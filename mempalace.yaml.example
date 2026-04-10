@@ -1,0 +1,40 @@
+wing: MyProject
+rooms:
+- name: decisions
+  description: Architecture and design decisions made during development
+  keywords:
+  - decision
+  - chose
+  - created
+  - refactor
+  - changed
+- name: features
+  description: Features implemented and their context
+  keywords:
+  - feature
+  - implement
+  - added
+  - api
+  - endpoint
+- name: bugs
+  description: Bugs found and fixes applied
+  keywords:
+  - bug
+  - fix
+  - error
+  - issue
+  - exception
+- name: setup
+  description: Environment and tooling setup
+  keywords:
+  - install
+  - setup
+  - configure
+  - hook
+  - cron
+- name: general
+  description: General project notes and context
+  keywords:
+  - note
+  - context
+  - general
