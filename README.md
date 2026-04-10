@@ -226,4 +226,5 @@ Scripts are copied unchanged.
 | `mempalace.yaml` | No | Room definitions (gitignored) |
 | `mempalace-refs/` | No | Auto-generated (gitignored) |
 | `graphify-out/` | No | Auto-generated graph + Obsidian vault (gitignored) |
+
 "# synaptic-memory" 
