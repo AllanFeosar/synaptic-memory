@@ -136,13 +136,19 @@ The Stop hook fires every 15 messages and tells Claude to save key topics, decis
 
 ## Step 5 — Add to your project (per project)
 
+Run these from the **synaptic-memory repo root**, replacing `<project_root>` with your project path:
+
 **Copy scripts:**
-```
-scripts/mempal_to_graphify.py
-scripts/graphify_wiki.py
+```bash
+cp scripts/mempal_to_graphify.py "<project_root>/scripts/"
+cp scripts/graphify_wiki.py "<project_root>/scripts/"
 ```
 
-**Create `mempalace.project.json`** (copy from `mempalace.project.json.example`):
+**Create `mempalace.project.json`** in the project root (copy from `mempalace.project.json.example`):
+```bash
+cp mempalace.project.json.example "<project_root>/mempalace.project.json"
+```
+Then edit it:
 ```json
 {
   "project_slug": "MY-PROJECT",
@@ -156,13 +162,13 @@ scripts/graphify_wiki.py
 
 **Create `mempalace.yaml`** in the project root (copy from `mempalace.yaml.example`, change wing name):
 ```bash
-cp mempalace.yaml.example mempalace.yaml
-# edit wing: MyProject → your wing name
+cp mempalace.yaml.example "<project_root>/mempalace.yaml"
+# then edit wing: MyProject → your wing name
 ```
 
-**Create empty folder:**
+**Create empty placeholder folder:**
 ```bash
-mkdir mempalace-refs
+mkdir "<project_root>/mempalace-refs"
 ```
 
 ---
@@ -224,7 +230,5 @@ Scripts are copied unchanged.
 | `mempalace.yaml.example` | Yes | Room definitions template |
 | `mempalace.project.json` | No | Per-project config (gitignored) |
 | `mempalace.yaml` | No | Room definitions (gitignored) |
-| `mempalace-refs/` | No | Auto-generated (gitignored) |
+| `mempalace-refs/` | No | Empty placeholder folder (gitignored — scripts never write here) |
 | `graphify-out/` | No | Auto-generated graph + Obsidian vault (gitignored) |
-
-"# synaptic-memory" 

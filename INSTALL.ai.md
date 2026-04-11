@@ -234,8 +234,9 @@ py -3.11 scripts/mempal_to_graphify.py
 Expected output:
 ```
 [mempal_bridge] Mine complete.
-[mempal_bridge] graphify rebuild done.
-[mempal_bridge] <N> memory nodes injected, <M> links created.
+[mempal_bridge] Graphify rebuild complete.
+[mempal_bridge] Created <M> memory→code links
+[mempal_bridge] Injected <N> memory node(s) → graph.json
 ```
 
 Then generate the Obsidian wiki:
