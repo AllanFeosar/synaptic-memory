@@ -210,11 +210,6 @@ cp mempalace.yaml.example "<project_root>/mempalace.yaml"
 # then edit wing: MyProject → your wing name
 ```
 
-**Create empty placeholder folder:**
-```bash
-mkdir "<project_root>/mempalace-refs"
-```
-
 ---
 
 ## Daily usage
