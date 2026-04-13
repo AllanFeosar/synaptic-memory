@@ -12,8 +12,9 @@
 |---|---|---|
 | mempalace | Stores Claude Code session memory in ChromaDB via semantic embeddings | Python 3.11 |
 | graphify | Builds a knowledge graph from the codebase via AST extraction | Python 3.14 |
-| Claude Code hooks | Triggers memory saves automatically during every session | Claude Code CLI |
-| bridge script | Mines memory into ChromaDB, injects memory nodes into the graph | Python 3.11 |
+| Claude Code hooks | Triggers memory saves automatically (session-start, stop, precompact) | Claude Code CLI |
+| mempalace MCP server | Gives Claude read/write access to the palace from any project | Python 3.11 |
+| bridge script | Injects palace memory nodes into the graphify code graph | Python 3.11 |
 | Obsidian | Visualizes the graph — open `graphify-out/` as a vault | Manual install |
 
 ---
@@ -41,7 +42,7 @@ Record the answers — you will use them in Steps 1–6.
 ```bash
 # Replace <clone_location> with the user's chosen path
 cd "<clone_location>"
-git clone https://github.com/milla-jovovich/mempalace.git
+git clone https://github.com/MemPalace/mempalace.git
 py -3.11 -m pip install -e mempalace/
 ```
 
@@ -92,35 +93,32 @@ No commands needed — proceed to Step 4.
 
 ---
 
-## Step 4 — Install Claude Code hooks (global, one-time)
+## Step 4 — Register Claude Code hooks (global, one-time)
 
-Copy hooks from the mempalace repo (cloned in Step 1):
-
-```bash
-cp "<clone_location>/mempalace/hooks/mempal_save_hook.sh" ~/.claude/hooks/
-cp "<clone_location>/mempalace/hooks/mempal_precompact_hook.sh" ~/.claude/hooks/
-chmod +x ~/.claude/hooks/mempal_save_hook.sh
-chmod +x ~/.claude/hooks/mempal_precompact_hook.sh
-```
-
-Now update `~/.claude/settings.json` to register both hooks.
-Read the existing file first. Then add the hooks block (merge with any existing hooks — do not overwrite unrelated settings):
+No files to copy. mempalace ships a built-in hook runner. Read `~/.claude/settings.json` first, then merge in the hooks block (do not overwrite unrelated settings):
 
 ```json
 {
   "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "py -3.11 -m mempalace hook run --hook session-start --harness claude-code",
+        "timeout": 30
+      }]
+    }],
     "Stop": [{
       "matcher": "*",
       "hooks": [{
         "type": "command",
-        "command": "/absolute/path/to/.claude/hooks/mempal_save_hook.sh",
+        "command": "py -3.11 -m mempalace hook run --hook stop --harness claude-code",
         "timeout": 30
       }]
     }],
     "PreCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "/absolute/path/to/.claude/hooks/mempal_precompact_hook.sh",
+        "command": "py -3.11 -m mempalace hook run --hook precompact --harness claude-code",
         "timeout": 30
       }]
     }]
@@ -128,12 +126,36 @@ Read the existing file first. Then add the hooks block (merge with any existing 
 }
 ```
 
-**Important:** Replace `/absolute/path/to/` with the real absolute path (e.g. `C:/Users/<username>/.claude/hooks/`).
-
-Verify hooks file exists:
+Verify the hook works:
 ```bash
-ls ~/.claude/hooks/
+echo '{"session_id":"test","stop_hook_active":false,"transcript_path":""}' | py -3.11 -m mempalace hook run --hook stop --harness claude-code
 ```
+
+Expected output: `{}` (pass-through until 15 exchanges are reached, then a block reason).
+
+---
+
+## Step 4.5 — Register the MCP server (global, one-time)
+
+mempalace ships a built-in MCP server that gives Claude read/write access to the palace from any project.
+
+Run:
+```bash
+claude mcp add mempalace -- py -3.11 -m mempalace.mcp_server --palace "<storage_path>/palace"
+```
+
+Replace `<storage_path>` with the user's chosen storage path from Step 0.
+
+Verify it was added:
+```bash
+claude mcp list
+```
+
+The `mempalace` server should appear. Claude now has access to these tools globally:
+- `mempalace_search` — semantic search
+- `mempalace_add_drawer` — save content to ChromaDB
+- `mempalace_diary_write` — save compressed session summary
+- `mempalace_status` — show all wings + counts
 
 ---
 
@@ -224,8 +246,12 @@ rooms:
 
 ## Step 7 — Verify the full setup
 
-Run the bridge script for the first time:
+Check the palace has content:
+```bash
+py -3.11 -m mempalace status
+```
 
+Run the bridge script to sync memory into the graphify graph:
 ```bash
 cd "<project_root>"
 py -3.11 scripts/mempal_to_graphify.py
@@ -233,7 +259,6 @@ py -3.11 scripts/mempal_to_graphify.py
 
 Expected output:
 ```
-[mempal_bridge] Mine complete.
 [mempal_bridge] Graphify rebuild complete.
 [mempal_bridge] Created <M> memory→code links
 [mempal_bridge] Injected <N> memory node(s) → graph.json
@@ -252,13 +277,18 @@ Tell the user:
 
 ## Step 8 — Tell the user how to use it daily
 
-After each Claude Code session:
+**During sessions — fully automatic:**
+- Hooks fire at session start, every 15 exchanges, and before compaction
+- Claude saves memory via `mempalace_add_drawer` and `mempalace_diary_write` MCP tools directly to ChromaDB
+
+**To query memory on-demand inside any Claude session:**
+Ask Claude to call `mempalace_search("your query")` or `mempalace_status()`.
+
+**To sync into the graphify graph (optional, after session):**
 ```bash
-py -3.11 scripts/mempal_to_graphify.py   # mine + rebuild + inject
+py -3.11 scripts/mempal_to_graphify.py   # rebuild + inject memory nodes
 python scripts/graphify_wiki.py --clean  # refresh Obsidian
 ```
-
-Hooks fire automatically during sessions — no manual trigger needed.
 
 ---
 
@@ -270,7 +300,8 @@ Hooks fire automatically during sessions — no manual trigger needed.
 | `py -3.14` not found | Install Python 3.14 from python.org; check "Add to PATH" |
 | `No module named 'chromadb'` | Run `py -3.11 -m pip install -e <clone_location>/mempalace/` |
 | `No module named 'graphify'` | Run `py -3.14 -m pip install -e <clone_location>/graphify/` |
-| Mine warning on first run | Normal — palace is empty; run again after a Claude session |
+| Hook outputs error instead of `{}` | Check `py -3.11 -m mempalace --help` resolves; verify mempalace is installed for 3.11 |
+| MCP server not appearing in Claude | Run `claude mcp list`; re-run `claude mcp add` command if missing |
 | `mempalace.yaml` not found | Ensure `mempalace.yaml` exists in the project root (copy from `mempalace.yaml.example`) |
-| 0 memory nodes injected | No Claude sessions recorded yet for this wing; complete a session first |
+| 0 memory nodes injected | No sessions saved to palace yet; complete a session first so hooks fire |
 | Obsidian shows no graph | Open the correct folder: `<project_root>/graphify-out/` not the repo root |

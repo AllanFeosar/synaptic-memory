@@ -1,6 +1,21 @@
 # synaptic-memory
 
-Persistent memory for Claude Code — stored in [mempalace](https://github.com/milla-jovovich/mempalace) (ChromaDB), wired into [graphify](https://github.com/safishamsi/graphify) (knowledge graph), visualized in [Obsidian](https://obsidian.md).
+Persistent memory for Claude Code — stored in [mempalace](https://github.com/MemPalace/mempalace) (ChromaDB), wired into [graphify](https://github.com/safishamsi/graphify) (knowledge graph), visualized in [Obsidian](https://obsidian.md).
+
+---
+
+## Credits
+
+This repo is a setup guide and bridge layer. It depends entirely on two open-source projects:
+
+| Project | Repo | What it provides |
+|---|---|---|
+| **mempalace** | [github.com/MemPalace/mempalace](https://github.com/MemPalace/mempalace) | ChromaDB palace, MCP server, hook runner, semantic search |
+| **graphify** | [github.com/safishamsi/graphify](https://github.com/safishamsi/graphify) | AST-based code knowledge graph, community detection, Obsidian wiki |
+
+All the actual memory storage, MCP tools, and hook logic comes from **mempalace**.
+All the code graph generation and visualization comes from **graphify**.
+This repo only provides the bridge scripts and setup instructions to wire them together.
 
 ---
 
@@ -42,13 +57,18 @@ After running the two scripts you get:
 ```
 Claude Code session
       │
-      │  Stop hook fires every 15 messages
-      ▼
-~/.claude/projects/<project>/memory/*.md
+      ├─ SessionStart hook fires → initializes session state
       │
+      │  Stop hook fires every 15 messages
+      │  PreCompact hook fires before context compression
+      ▼
+Claude calls MCP tools directly:
+  mempalace_add_drawer   → saves decisions, quotes, code to ChromaDB
+  mempalace_diary_write  → saves compressed session summary
+      │
+      │  (manual, after session)
       │  py -3.11 scripts/mempal_to_graphify.py
       │
-      ├─ mempalace mine  → ChromaDB palace
       ├─ graphify rebuild → code graph (graphify-out/graph.json)
       ├─ query ChromaDB by wing → memory documents for this project
       └─ inject memory nodes + keyword links into graph.json
@@ -56,6 +76,10 @@ Claude Code session
       │  python scripts/graphify_wiki.py --clean
       ▼
 graphify-out/wiki/*.md  ← open as Obsidian vault → Ctrl+G
+
+On-demand (any time via MCP):
+  mempalace_search("query")  → semantic search across all memory
+  mempalace_status()         → see all wings + counts
 ```
 
 ---
@@ -73,7 +97,7 @@ mempalace stores and searches memory via ChromaDB + semantic embeddings.
 Requires **Python 3.11** (incompatible with 3.14 due to ChromaDB/pydantic constraints).
 
 ```bash
-git clone https://github.com/milla-jovovich/mempalace.git
+git clone https://github.com/MemPalace/mempalace.git
 py -3.11 -m pip install -e mempalace/
 ```
 
@@ -106,31 +130,51 @@ Download from [obsidian.md](https://obsidian.md) — free desktop app, no accoun
 
 ---
 
-## Step 4 — Install Claude Code hooks (one-time)
+## Step 4 — Register Claude Code hooks (one-time)
 
-Hooks come from the [mempalace repo](https://github.com/milla-jovovich/mempalace) — copy them from there:
+No files to copy. mempalace ships a built-in hook runner. Add to `~/.claude/settings.json`:
 
-```bash
-cp mempalace/hooks/mempal_save_hook.sh ~/.claude/hooks/
-cp mempalace/hooks/mempal_precompact_hook.sh ~/.claude/hooks/
-```
-
-Add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
+    "SessionStart": [{
+      "hooks": [{"type": "command", "command": "py -3.11 -m mempalace hook run --hook session-start --harness claude-code", "timeout": 30}]
+    }],
     "Stop": [{
       "matcher": "*",
-      "hooks": [{"type": "command", "command": "/absolute/path/to/mempal_save_hook.sh", "timeout": 30}]
+      "hooks": [{"type": "command", "command": "py -3.11 -m mempalace hook run --hook stop --harness claude-code", "timeout": 30}]
     }],
     "PreCompact": [{
-      "hooks": [{"type": "command", "command": "/absolute/path/to/mempal_precompact_hook.sh", "timeout": 30}]
+      "hooks": [{"type": "command", "command": "py -3.11 -m mempalace hook run --hook precompact --harness claude-code", "timeout": 30}]
     }]
   }
 }
 ```
 
-The Stop hook fires every 15 messages and tells Claude to save key topics, decisions, and code to memory. The PreCompact hook fires before context compression for a final save.
+- **SessionStart** — initializes session state tracking
+- **Stop** — fires every 15 messages, tells Claude to save via MCP tools
+- **PreCompact** — fires before context compression for a final thorough save
+
+## Step 4.5 — Register the MCP server (global, one-time)
+
+mempalace ships a built-in MCP server. Register it globally so Claude can query and write memory from any project:
+
+```bash
+claude mcp add mempalace -- py -3.11 -m mempalace.mcp_server --palace "<storage_path>/palace"
+```
+
+Replace `<storage_path>` with your chosen path (e.g. `D:\.lmstudio\Memory`).
+
+This gives Claude these tools in every session:
+
+| Tool | What it does |
+|---|---|
+| `mempalace_search` | Semantic search across all stored memory |
+| `mempalace_add_drawer` | Save content directly to ChromaDB |
+| `mempalace_diary_write` | Save compressed session summary |
+| `mempalace_status` | Show all wings + drawer counts |
+| `mempalace_list_wings` / `mempalace_list_rooms` | Browse the palace structure |
+| `mempalace_check_duplicate` | Avoid saving the same thing twice |
 
 ---
 
@@ -175,15 +219,21 @@ mkdir "<project_root>/mempalace-refs"
 
 ## Daily usage
 
-**After each Claude Code session:**
+**During sessions — fully automatic:**
+
+Hooks fire automatically. Claude saves memory via MCP tools (`mempalace_add_drawer`, `mempalace_diary_write`) directly to ChromaDB. No manual steps needed.
+
+**To query memory on-demand** (any time, inside any Claude session):
+
+Ask Claude to call `mempalace_search("your query")` or `mempalace_status()`.
+
+**To sync memory into the graphify knowledge graph** (optional, after session):
+
 ```bash
 py -3.11 scripts/mempal_to_graphify.py
 ```
 
-Does everything in one command:
-- Mines Claude memory files into ChromaDB (tagged with project wing)
-- Rebuilds graphify code graph
-- Injects memory nodes + keyword code links into `graph.json`
+Injects memory nodes + keyword code links into `graphify-out/graph.json`.
 
 **Refresh Obsidian:**
 ```bash
