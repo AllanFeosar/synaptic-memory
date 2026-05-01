@@ -1,279 +1,316 @@
 # synaptic-memory
 
-Persistent memory for Claude Code — stored in [mempalace](https://github.com/MemPalace/mempalace) (ChromaDB), wired into [graphify](https://github.com/safishamsi/graphify) (knowledge graph), visualized in [Obsidian](https://obsidian.md).
-
----
-
-## Credits
-
-This repo is a setup guide and bridge layer. It depends entirely on two open-source projects:
-
-| Project | Repo | What it provides |
-|---|---|---|
-| **mempalace** | [github.com/MemPalace/mempalace](https://github.com/MemPalace/mempalace) | ChromaDB palace, MCP server, hook runner, semantic search |
-| **graphify** | [github.com/safishamsi/graphify](https://github.com/safishamsi/graphify) | AST-based code knowledge graph, community detection, Obsidian wiki |
-
-All the actual memory storage, MCP tools, and hook logic comes from **mempalace**.
-All the code graph generation and visualization comes from **graphify**.
-This repo only provides the bridge scripts and setup instructions to wire them together.
+Persistent memory layer for Claude Code — stored in [mempalace](https://github.com/MemPalace/mempalace) (ChromaDB), enriched by [graphify](https://github.com/safishamsi/graphify) (knowledge graph), visualized in [Obsidian](https://obsidian.md).
 
 ---
 
 ## What is this?
 
-Every time you work with Claude Code, valuable context disappears when the session ends — architecture decisions, bug fixes, why a certain approach was chosen, what was tried and failed. The next session starts cold.
+Every Claude Code session ends cold — architecture decisions, bug fixes, reasoning behind choices all disappear. synaptic-memory solves this with two layers:
 
-**synaptic-memory** solves this by building a persistent, searchable memory layer that connects directly to your codebase:
+- **mempalace** — ChromaDB vector database + MCP server. Claude saves raw memory during sessions via hooks.
+- **typed/** — Typed memory layer on top of mempalace. Adds schemas, embedding-based dedup, salience reranking, auto SessionStart injection, trust calibration, and nightly consolidation.
 
-- Claude Code automatically saves memory during every session (via hooks)
-- Those memories are stored in a local vector database (mempalace / ChromaDB) — fully offline, nothing leaves your machine
-- A bridge script mines those memories and injects them as nodes into your project's code knowledge graph (graphify)
-- Each memory node is linked to the actual classes, methods, and files it relates to — using keyword matching against the graph
-- The result is navigable in Obsidian as a graph — you can see memory sitting next to the code it documents
+Both layers run together. The `typed/` layer wraps mempalace — it passes through to mempalace rather than replacing it.
 
-**Memory sits next to the code it documents — not in a separate system.**
-
-### Why is this useful?
-
-| Without synaptic-memory | With synaptic-memory |
-|---|---|
-| Every Claude session starts cold | Claude reads previous decisions and context automatically |
-| "Why did we do it this way?" has no answer | Memory nodes link to the exact code with the reasoning |
-| Architecture decisions live in chat history | Stored, searchable, and visible in Obsidian graph |
-| You repeat context every session | One command syncs all memory into the graph |
-| Memory is separate from code | Memory nodes sit next to the code they document |
-
-### What it produces
-
-After running the two scripts you get:
-- A **ChromaDB palace** — semantically searchable memory for your project, queryable by Claude or any LLM
-- A **graphify knowledge graph** — your codebase as a graph, with memory nodes injected and linked to code
-- An **Obsidian vault** — browse everything visually, see memory clustered with the code it relates to
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full flow diagram and token math.
 
 ---
 
-## How it works
+## Credits
 
-```
-Claude Code session
-      │
-      ├─ SessionStart hook fires → initializes session state
-      │
-      │  Stop hook fires every 15 messages
-      │  PreCompact hook fires before context compression
-      ▼
-Claude calls MCP tools directly:
-  mempalace_add_drawer   → saves decisions, quotes, code to ChromaDB
-  mempalace_diary_write  → saves compressed session summary
-      │
-      │  (manual, after session)
-      │  py -3.11 scripts/mempal_to_graphify.py
-      │
-      ├─ graphify rebuild → code graph (graphify-out/graph.json)
-      ├─ query ChromaDB by wing → memory documents for this project
-      └─ inject memory nodes + keyword links into graph.json
-      │
-      │  python scripts/graphify_wiki.py --clean
-      ▼
-graphify-out/wiki/*.md  ← open as Obsidian vault → Ctrl+G
+| Project | Repo | What it provides |
+| --- | --- | --- |
+| **mempalace** | [github.com/MemPalace/mempalace](https://github.com/MemPalace/mempalace) | ChromaDB palace, MCP server, hook runner, semantic search |
+| **graphify** | [github.com/safishamsi/graphify](https://github.com/safishamsi/graphify) | AST-based code knowledge graph, community detection, Obsidian wiki |
 
-On-demand (any time via MCP):
-  mempalace_search("query")  → semantic search across all memory
-  mempalace_status()         → see all wings + counts
+---
+
+## Global setup (one-time)
+
+### Step 1 — Clone this repo
+
+```bash
+git clone https://github.com/your-org/synaptic-memory.git
+# remember where you cloned it — you'll need the path in Step 4
 ```
 
----
-
-## AI-assisted setup
-
-If you're working with an AI assistant (Claude, Copilot, Cursor, etc.), share [`INSTALL.ai.md`](INSTALL.ai.md) with it.
-That file is written as a direct prompt — your AI will read it and execute the full install for you, asking only the questions it needs (Python versions, storage path, project name).
-
----
-
-## Step 1 — Install mempalace
-
-mempalace stores and searches memory via ChromaDB + semantic embeddings.
-Requires **Python 3.11** (incompatible with 3.14 due to ChromaDB/pydantic constraints).
+### Step 2 — Install mempalace (Python 3.11)
 
 ```bash
 git clone https://github.com/MemPalace/mempalace.git
-py -3.11 -m pip install -e mempalace/
+python3.11 -m pip install -e mempalace/
+# Windows: py -3.11 -m pip install -e mempalace/
 ```
 
-On first run, mempalace downloads `all-MiniLM-L6-v2` (79MB ONNX model) — one-time only.
+Configure storage in `~/.mempalace/config.json`:
 
-Configure storage location in `~/.mempalace/config.json`:
 ```json
 {
-  "palace_path": "/your/chosen/memory/storage/palace"
+  "palace_path": "/path/to/your/memory/palace"
 }
 ```
 
----
-
-## Step 2 — Install graphify
-
-graphify builds a knowledge graph from your codebase via AST extraction.
-Requires **Python 3.14**.
+### Step 3 — Install graphify (Python 3.14)
 
 ```bash
 git clone https://github.com/safishamsi/graphify.git
-py -3.14 -m pip install -e graphify/
+python3.14 -m pip install -e graphify/
+# Windows: py -3.14 -m pip install -e graphify/
 ```
 
----
+### Step 4 — Install Obsidian (optional, for visualization)
 
-## Step 3 — Install Obsidian
+Download from [obsidian.md](https://obsidian.md) — free, no account needed.
 
-Download from [obsidian.md](https://obsidian.md) — free desktop app, no account needed.
+### Step 5 — Register Claude Code hooks
 
----
+Add to `~/.claude/settings.json`. Replace `<synaptic-memory-path>` with where you cloned this repo.
 
-## Step 4 — Register Claude Code hooks (one-time)
-
-No files to copy. mempalace ships a built-in hook runner. Add to `~/.claude/settings.json`:
+The hooks chain mempalace first, then the typed layer with `--no-mempalace-passthrough` to avoid double-firing:
 
 ```json
 {
   "hooks": {
+    "PreToolUse": [{
+      "matcher": "Glob|Grep",
+      "hooks": [
+        {"type": "command", "command": "python3.14 -c \"import sys,os,json; d=os.path.exists('graphify-out/graph.json'); print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'graphify: Knowledge graph exists. Read graphify-out/GRAPH_REPORT.md before searching raw files.'}})) if d else None\""}
+      ]
+    }],
     "SessionStart": [{
-      "hooks": [{"type": "command", "command": "py -3.11 -m mempalace hook run --hook session-start --harness claude-code", "timeout": 30}]
+      "hooks": [
+        {"type": "command", "command": "python3.11 -m mempalace hook run --hook session-start --harness claude-code"},
+        {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/session_start.py\" --no-mempalace-passthrough"}
+      ]
     }],
     "Stop": [{
-      "matcher": "*",
-      "hooks": [{"type": "command", "command": "py -3.11 -m mempalace hook run --hook stop --harness claude-code", "timeout": 30}]
+      "hooks": [
+        {"type": "command", "command": "python3.11 -m mempalace hook run --hook stop --harness claude-code"},
+        {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/stop_15msg.py\" --no-mempalace-passthrough"}
+      ]
     }],
     "PreCompact": [{
-      "hooks": [{"type": "command", "command": "py -3.11 -m mempalace hook run --hook precompact --harness claude-code", "timeout": 30}]
+      "hooks": [
+        {"type": "command", "command": "python3.11 -m mempalace hook run --hook precompact --harness claude-code"},
+        {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/pre_compact.py\""}
+      ]
     }]
   }
 }
 ```
 
-- **SessionStart** — initializes session state tracking
-- **Stop** — fires every 15 messages, tells Claude to save via MCP tools
-- **PreCompact** — fires before context compression for a final thorough save
+> **Windows:** Replace `python3.11` with `py -3.11` and `python3.14` with `py -3.14`.
 
-## Step 4.5 — Register the MCP server (global, one-time)
+Hook behavior:
 
-mempalace ships a built-in MCP server. Register it globally so Claude can query and write memory from any project:
+- **PreToolUse** — before Glob/Grep, reminds Claude to check the knowledge graph
+- **SessionStart** — mempalace loads prior context; typed layer injects top-3 summaries (~150 tokens)
+- **Stop** (every 15 messages) — mempalace saves raw memory; typed layer writes one summary drawer
+- **PreCompact** — read-only; surfaces pinned drawers before context compaction
+
+### Step 6 — Configure MCP servers
+
+Copy `.mcp.json.example` to `.mcp.json` in your project root and fill in your paths:
 
 ```bash
-claude mcp add mempalace -- py -3.11 -m mempalace.mcp_server --palace "<storage_path>/palace"
+cp .mcp.json.example .mcp.json
 ```
 
-Replace `<storage_path>` with your chosen path (e.g. `D:\.lmstudio\Memory`).
+Then edit `.mcp.json`:
 
-This gives Claude these tools in every session:
+```json
+{
+  "mcpServers": {
+    "mempalace": {
+      "type": "stdio",
+      "command": "python3.11",
+      "args": ["-m", "mempalace.mcp_server", "--palace", "/path/to/your/memory/palace"],
+      "env": {"MEMPALACE_HARNESS": "claude-code"}
+    },
+    "graphify": {
+      "type": "stdio",
+      "command": "python3.14",
+      "args": ["-m", "graphify.serve", "graphify-out/graph.json"],
+      "env": {}
+    }
+  }
+}
+```
+
+> **Windows:** Use `py -3.11` / `py -3.14` and full Python executable paths if `py` launcher doesn't resolve correctly.
+
+Claude now has these tools in every session:
 
 | Tool | What it does |
-|---|---|
+| --- | --- |
 | `mempalace_search` | Semantic search across all stored memory |
-| `mempalace_add_drawer` | Save content directly to ChromaDB |
+| `mempalace_add_drawer` | Save content to ChromaDB |
 | `mempalace_diary_write` | Save compressed session summary |
 | `mempalace_status` | Show all wings + drawer counts |
-| `mempalace_list_wings` / `mempalace_list_rooms` | Browse the palace structure |
-| `mempalace_check_duplicate` | Avoid saving the same thing twice |
+| `query_graph` | Traverse the codebase knowledge graph |
+| `god_nodes` | Find the most connected code concepts |
 
 ---
 
-## Step 5 — Add to your project (per project)
+## Per-project setup
 
-Run these from the **synaptic-memory repo root**, replacing `<project_root>` with your project path:
+Only these things change per project — global hooks and MCP servers never need to change.
 
-**Copy scripts:**
-```bash
-cp scripts/mempal_to_graphify.py "<project_root>/scripts/"
-cp scripts/graphify_wiki.py "<project_root>/scripts/"
-```
+### 1. Config files (project root)
 
-**Create `mempalace.project.json`** in the project root (copy from `mempalace.project.json.example`):
-```bash
-cp mempalace.project.json.example "<project_root>/mempalace.project.json"
-```
-Then edit it:
+**`mempalace.project.json`** — copy from `mempalace.project.json.example` and fill in:
+
 ```json
 {
   "project_slug": "MY-PROJECT",
-  "wing":         "MyProject",
-  "memory_archive": "/your/chosen/memory/storage"
+  "wing":         "my-project",
+  "memory_archive": "/path/to/your/memory"
 }
 ```
-- `project_slug` — partial match against your Claude Code project folder name
-- `wing` — unique tag per project, isolates memories in ChromaDB
-- `memory_archive` — same root as your `palace_path` minus `/palace`
 
-**Create `mempalace.yaml`** in the project root (copy from `mempalace.yaml.example`, change wing name):
-```bash
-cp mempalace.yaml.example "<project_root>/mempalace.yaml"
-# then edit wing: MyProject → your wing name
+- `project_slug` — matches your Claude Code project folder name
+- `wing` — unique tag that isolates this project's memories in ChromaDB
+- `memory_archive` — parent directory of your palace (same as palace path, minus `/palace`)
+
+**`mempalace.yaml`** — copy from `mempalace.yaml.example` and update the wing name:
+
+```yaml
+wing: my-project
+rooms:
+- name: decisions
+- name: features
+- name: bugs
+- name: setup
+- name: general
 ```
+
+Both files are gitignored — safe to put local paths in them.
+
+### 2. Build the knowledge graph
+
+```bash
+cd <your-project>
+python3.14 -m graphify .   # or: /graphify in Claude Code
+```
+
+This generates `graphify-out/graph.json`. Once built, the graphify MCP server starts serving it and the PreToolUse hook activates automatically.
+
+### 3. Scope tag (optional but recommended)
+
+Set `SYNAPTIC_V2_SCOPE=MY-PROJECT` in the project's environment so hooks tag drawers to the correct project scope. Without this, scope falls back to the current folder name.
+
+### 4. Nightly consolidation cron (optional)
+
+Add one entry per project, daily at 1:00 AM:
+
+```bash
+# Linux / macOS (crontab -e)
+0 1 * * * cd /path/to/your/project && python3.11 -c "from typed.consolidate import run_consolidation; run_consolidation()"
+
+# Windows (Task Scheduler)
+py -3.11 -c "from typed.consolidate import run_consolidation; run_consolidation()"
+```
+
+This reranks drawers by salience, detects contradictions, flags stale memories, archives zero-hit drawers older than 90 days, and syncs to graphify automatically.
 
 ---
 
 ## Daily usage
 
-**During sessions — fully automatic:**
+**During sessions — fully automatic.**
+Hooks fire at session start, every 15 messages, and before compaction. No manual steps.
 
-Hooks fire automatically. Claude saves memory via MCP tools (`mempalace_add_drawer`, `mempalace_diary_write`) directly to ChromaDB. No manual steps needed.
+**On-demand memory search** (any Claude session):
 
-**To query memory on-demand** (any time, inside any Claude session):
-
-Ask Claude to call `mempalace_search("your query")` or `mempalace_status()`.
-
-**To sync memory into the graphify knowledge graph** (optional, after session):
-
-```bash
-py -3.11 scripts/mempal_to_graphify.py
+```text
+mempalace_search("your query")
+mempalace_status()
 ```
 
-Injects memory nodes + keyword code links into `graphify-out/graph.json`.
+**Manual graphify sync** (if not using nightly cron):
 
-**Refresh Obsidian:**
 ```bash
-python scripts/graphify_wiki.py --clean
+python3.11 scripts/mempal_to_graphify.py   # inject memories into code graph
+python3.14 scripts/graphify_wiki.py --clean  # rebuild Obsidian wiki
 ```
+
+**View in Obsidian:**
+Open `graphify-out/` as vault → `Ctrl+G` → memory nodes appear as `[MEM] <name>` linked to code.
 
 ---
 
-## Viewing memory in Obsidian
+## Typed write API
 
-1. Open Obsidian → **Open folder as vault** → select `graphify-out/` inside your project
-2. Press `Ctrl+G` — full graph view
-3. Memory nodes appear as `[MEM] <name>` — linked to related code nodes
-4. Click any `[MEM]` node to see which classes and methods it documents
-5. Click any code node to see which memories relate to it
+When you want to explicitly save a typed decision mid-session:
 
-**In the graph panel:**
-- Filter nodes by `type: memory` to highlight only memory nodes
-- Set node size to **Connections** to surface the most-linked nodes
+```python
+from typed.write import write_decision, write_pattern, write_recipe
 
----
+write_decision(
+    scope="auth",
+    body="Chose JWT over session cookies — 8 microservices need stateless auth.",
+    confidence="high",
+)
+```
 
-## Adding to a new project
+Drawer types: `decision`, `pattern`, `anti-pattern`, `recipe`, `postmortem`, `summary`
 
-Only 3 things change per project:
+If a semantically similar drawer exists (cosine similarity > 0.92), `DuplicateDrawerError` is raised with the existing `drawer_id` — use `supersedes=` to replace it.
 
-| What | Change |
-|---|---|
-| `mempalace.project.json` | `project_slug`, `wing`, `memory_archive` |
-| `mempalace.yaml` | `wing` name + room keywords |
-| `mempalace-refs/` | Create empty folder |
+**Trust calibration** — when a user corrects Claude after a drawer was cited:
 
-Scripts are copied unchanged.
+```python
+from typed.telemetry import mark_correction
+mark_correction(["drw_xxx"])  # auto-demotes to confidence=low after 2 hits
+```
+
+**Token budget tracking:**
+
+```bash
+python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "session"
+python3.11 -m typed.budget   # show baseline + targets
+```
 
 ---
 
 ## File reference
 
-| File | Committed | Purpose |
-|---|---|---|
-| `scripts/mempal_to_graphify.py` | Yes | Bridge: mine → inject → rebuild |
-| `scripts/graphify_wiki.py` | Yes | Obsidian wiki generator |
-| `mempalace.project.json.example` | Yes | Config template |
+| File / Folder | Committed | Purpose |
+| --- | --- | --- |
+| `ARCHITECTURE.md` | Yes | Full flow diagram, token math, coupling surface |
+| `INSTALL.ai.md` | Yes | Step-by-step setup prompt for AI assistants |
+| `synaptic-memory-design-spec.md` | Yes | Full operational design spec |
+| `.mcp.json.example` | Yes | MCP server config template |
+| `mempalace.project.json.example` | Yes | Per-project config template |
 | `mempalace.yaml.example` | Yes | Room definitions template |
-| `mempalace.project.json` | No | Per-project config (gitignored) |
-| `mempalace.yaml` | No | Room definitions (gitignored) |
-| `mempalace-refs/` | No | Empty placeholder folder (gitignored — scripts never write here) |
-| `graphify-out/` | No | Auto-generated graph + Obsidian vault (gitignored) |
+| `.mcp.json` | No (gitignored) | Your local MCP config with real paths |
+| `mempalace.project.json` | No (gitignored) | Your local per-project config |
+| `mempalace.yaml` | No (gitignored) | Your local room definitions |
+| `hooks/session_start.py` | Yes | SessionStart hook |
+| `hooks/stop_15msg.py` | Yes | Stop hook (every 15 messages) |
+| `hooks/pre_compact.py` | Yes | PreCompact hook (read-only) |
+| `scripts/mempal_to_graphify.py` | Yes | Bridge: mine ChromaDB → inject into graphify |
+| `scripts/graphify_wiki.py` | Yes | Obsidian wiki generator |
+| `typed/` | Yes | Typed memory package (types, write, read, consolidate, telemetry, budget) |
+| `tests/` | Yes | 21 unit tests |
+| `graphify-out/` | No (gitignored) | Auto-generated graph + Obsidian vault |
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+| --- | --- |
+| `python3.11` not found | Install Python 3.11 from python.org; on Windows use `py -3.11` |
+| `python3.14` not found | Install Python 3.14 from python.org; on Windows use `py -3.14` |
+| `No module named 'chromadb'` | `python3.11 -m pip install -e <mempalace-clone>/` |
+| `No module named 'graphify'` | `python3.14 -m pip install -e <graphify-clone>/` |
+| `No module named 'mcp'` | `python3.14 -m pip install mcp` |
+| Hook not firing | Verify `python3.11 -m mempalace --help` resolves |
+| MCP tools missing | Check `.mcp.json` exists in project root with correct paths |
+| `mempalace.yaml` not found | Copy `mempalace.yaml.example` → `mempalace.yaml` in project root |
+| graphify PreToolUse not firing | Ensure `graphify-out/graph.json` exists (run `/graphify` first) |
+| 0 memory nodes in graphify | Complete a session so hooks fire, then run `mempal_to_graphify.py` |
+| Obsidian shows no graph | Open `<project>/graphify-out/` not the synaptic-memory repo root |
+| Palace HNSW diverged | Run `python3.11 -m mempalace repair --yes` |

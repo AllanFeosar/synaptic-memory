@@ -1,0 +1,113 @@
+# synaptic-memory — Architecture
+
+```text
+                   ┌──────────────────────────────────────┐
+                   │           CLAUDE CODE SESSION         │
+                   │                                       │
+                   │   working memory (context window)     │
+                   └────┬──────────────────┬───────────────┘
+                        │                  │
+          SessionStart  │                  │   write_decision()
+          hook          │                  │   write_anti_pattern()
+                        │                  │   write_recipe()
+                        ▼                  ▼
+         ┌──────────────────┐    ┌────────────────────┐
+         │  read.py         │    │  write.py          │
+         │  - search_typed  │    │  - typed tuple     │
+         │  - inject ~150t  │    │  - embedding dedup │
+         │  - expand lazy   │    │  - supersedes link │
+         │  - file_summary  │    │  - frontmatter     │
+         └────────┬─────────┘    └─────────┬──────────┘
+                  │                        │
+                  └─────────┬──────────────┘
+                            ▼
+                ┌──────────────────────┐
+                │    client.py         │
+                │  MempalaceClient     │  (InProcess | Mock)
+                └──────────┬───────────┘
+                           │
+            ┌──────────────▼──────────────┐
+            │    mempalace (Python 3.11)  │
+            │    ChromaDB drawers         │
+            │    Wing / Room / Drawer     │
+            └──────────────┬──────────────┘
+                           │
+    ────── nightly 1am ────┘
+                           │
+                           ▼
+            ┌────────────────────────────┐
+            │    consolidate.py          │
+            │  - salience rerank         │
+            │  - contradiction detect    │
+            │  - stale-flag (file mtime) │
+            │  - archive zero-hit >90d   │
+            └──────────────┬─────────────┘
+                           │
+                           ▼
+            ┌────────────────────────────┐
+            │  scripts/                  │
+            │  mempal_to_graphify.py     │
+            │  (subprocess, Python 3.14) │
+            └──────────────┬─────────────┘
+                           │
+                           ▼
+            ┌────────────────────────────┐
+            │    graphify (offline)      │
+            │  Code knowledge graph      │
+            │  god nodes, communities    │
+            │  graphify-out/wiki/        │
+            └──────────────┬─────────────┘
+                           │
+                           ▼
+                      Obsidian vault
+                      (human read-only)
+```
+
+## Why graphify stays offline
+
+The Python 3.11/3.14 split makes live in-process integration costly.
+graphify's value is *structural awareness* (god nodes, communities,
+decision-to-code links), not retrieval ranking — mempalace's embeddings
+already handle retrieval. Putting graphify in the hot path adds a serial
+bottleneck for marginal gain.
+
+The nightly consolidation cron is when graphify earns its keep: it enriches
+mempalace drawers with `stale` flags and pinned status based on graph
+analysis, then renders the Obsidian wiki.
+
+## Memory tier mapping
+
+| Tier       | Storage                   | Lifespan | Created by                      |
+|------------|---------------------------|----------|---------------------------------|
+| Working    | Claude's context window   | turn     | the conversation                |
+| Episodic   | mempalace drawers         | 90d      | `write_decision`, `write_*`     |
+| Semantic   | pinned drawers + graphify | ∞        | consolidate.py auto-pins top 5% |
+| Procedural | drawers with type=recipe  | ∞        | `write_recipe`                  |
+
+## Token math
+
+Per session (estimate — measure yours with `typed/budget.py`):
+
+| Path                 | Without v2 | With v2 | Δ           |
+|----------------------|------------|---------|-------------|
+| SessionStart context | 0          | +150    | +150        |
+| File loads (large)   | ~10,000    | ~7,000  | −3,000      |
+| Decision recap       | ~10,000    | ~500    | −9,500      |
+| Drawer writes        | 0          | ~2,000  | +2,000      |
+| **Net per session**  | ~50,000    | ~39,600 | **−10,000** |
+
+Over 100 sessions: ~1M tokens saved. Compounds as the palace gets denser.
+
+## Coupling surface (what breaks if mempalace updates)
+
+| What changes in mempalace                    | What breaks here                                    |
+|----------------------------------------------|-----------------------------------------------------|
+| Hook CLI flags / subcommands                 | `~/.claude/settings.json` — manual edit             |
+| `mempalace.config.MempalaceConfig` fields    | `typed/client.py` `__init__` only                   |
+| `mempalace.palace.get_collection` signature  | `typed/client.py` `_collection()` only              |
+| `mempalace.searcher.build_where_filter` API  | `typed/client.py` `search()` only                   |
+| ChromaDB metadata field names                | `typed/client.py` `add_drawer()` / `search()` only  |
+
+All v2 logic (`write.py`, `read.py`, `consolidate.py`) talks only to the
+`MempalaceClient` abstract interface — if mempalace updates, fix one file
+(`typed/client.py`).

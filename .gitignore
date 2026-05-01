@@ -1,6 +1,6 @@
 mempalace.project.json
 mempalace.yaml
-mempalace-refs/
+.mcp.json
 graphify-out/
 __pycache__/
 *.pyc

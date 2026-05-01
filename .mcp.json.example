@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "mempalace": {
+      "type": "stdio",
+      "command": "python3.11",
+      "args": ["-m", "mempalace.mcp_server", "--palace", "<storage-path>/palace"],
+      "env": {
+        "MEMPALACE_HARNESS": "claude-code"
+      }
+    },
+    "graphify": {
+      "type": "stdio",
+      "command": "python3.14",
+      "args": ["-m", "graphify.serve", "graphify-out/graph.json"],
+      "env": {}
+    }
+  }
+}
