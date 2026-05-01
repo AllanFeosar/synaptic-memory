@@ -47,7 +47,7 @@ def search_typed(
     not just the most semantically similar.
     """
     client = client or InProcessClient()
-    raw_hits = client.search(query=query, top_k=top_k * 3, wing=scope)
+    raw_hits = client.search(query=query, top_k=top_k * 3, wing=scope.lower() if scope else None)
     drawers: list[TypedDrawer] = []
     for h in raw_hits:
         d = _hit_to_drawer(h)
