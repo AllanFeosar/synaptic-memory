@@ -112,12 +112,28 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
 ```json
 {
   "hooks": {
-    "PreToolUse": [{
-      "matcher": "Glob|Grep",
-      "hooks": [
-        {"type": "command", "command": "python3.14 -c \"import sys,os,json; d=os.path.exists('graphify-out/graph.json'); print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'graphify: Knowledge graph exists. Read graphify-out/GRAPH_REPORT.md for god nodes and community structure before searching raw files.'}})) if d else None\""}
-      ]
-    }],
+    "PreToolUse": [
+      {
+        "matcher": "Glob|Grep|Read",
+        "hooks": [
+          {"type": "command", "command": "python3.14 -c \"import os,json; d=os.path.exists('graphify-out/graph.json'); d and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'graphify: graph exists — read graphify-out/GRAPH_REPORT.md before searching raw files.'}}))\""}
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace('\\\\','/'); b='.claude/memory' in p or 'MEMORY.md' in p; b and (print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'BLOCKED: use mcp__mempalace__mempalace_add_drawer, not .claude/memory/'}})) or sys.exit(2))\""}
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path',''); remind=p and any(p.endswith(x) for x in ('.py','.ts','.tsx','.js','.cs','.sql','.json','.yaml','.yml')); remind and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'Code edited — if this completes a bug fix, feature, or decision, call mcp__mempalace__mempalace_add_drawer now.'}}))\""}
+        ]
+      }
+    ],
     "SessionStart": [{
       "hooks": [
         {"type": "command", "command": "python3.11 -m mempalace hook run --hook session-start --harness claude-code"},
@@ -144,9 +160,11 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
 
 Hook behavior:
 
-- **PreToolUse** — before Glob/Grep, injects a reminder to read `graphify-out/GRAPH_REPORT.md` first (only fires if `graphify-out/graph.json` exists)
+- **PreToolUse / Glob|Grep|Read** — before any file search or read, reminds Claude to check `graphify-out/GRAPH_REPORT.md` first (only fires if graph exists)
+- **PreToolUse / Write** — blocks writes to `.claude/memory/` or `MEMORY.md`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
+- **PostToolUse / Edit|Write** — after editing any code file, reminds Claude to save decisions to mempalace
 - **SessionStart** — mempalace loads prior context; typed layer injects top-3 typed summaries (~150 tokens)
-- **Stop** — fires every ~15 messages; mempalace saves raw memory; typed layer writes one summary drawer
+- **Stop** — fires every ~15 messages; typed layer writes one summary drawer and records drawer count to `typed/budget.py`
 - **PreCompact** — read-only; surfaces pinned drawers into context before compaction
 
 ---
@@ -256,6 +274,38 @@ Tell the user:
 
 > Open Obsidian → **Open folder as vault** → select `graphify-out/` inside your project.
 > Press `Ctrl+G` to see the full graph. Memory nodes appear as `[MEM] <name>` linked to related code.
+
+---
+
+## Step 8b — Schedule the nightly consolidation cron
+
+This reranks drawers by salience, detects contradictions, flags stale memories, archives zero-hit drawers older than 90 days, and syncs to graphify.
+
+**Linux / macOS** — add to crontab (`crontab -e`):
+
+```bash
+0 1 * * * cd <synaptic-memory-path> && python3.11 -m typed.consolidate --synaptic-repo <synaptic-memory-path>
+```
+
+**Windows** — run this once in PowerShell. It registers a persistent Task Scheduler entry:
+
+```powershell
+$action = New-ScheduledTaskAction `
+    -Execute "py.exe" `
+    -Argument '-3.11 -m typed.consolidate --synaptic-repo "<synaptic-memory-path>"' `
+    -WorkingDirectory "<synaptic-memory-path>"
+$trigger = New-ScheduledTaskTrigger -Daily -At 1:00AM
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+Register-ScheduledTask -TaskName "synaptic-memory-consolidate" `
+    -Action $action -Trigger $trigger -Settings $settings -Force
+```
+
+Verify it was registered:
+
+```powershell
+Get-ScheduledTask -TaskName "synaptic-memory-consolidate"
+# Expected State: Ready
+```
 
 ---
 

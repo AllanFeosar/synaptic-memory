@@ -72,12 +72,28 @@ The hooks chain mempalace first, then the typed layer with `--no-mempalace-passt
 ```json
 {
   "hooks": {
-    "PreToolUse": [{
-      "matcher": "Glob|Grep",
-      "hooks": [
-        {"type": "command", "command": "python3.14 -c \"import sys,os,json; d=os.path.exists('graphify-out/graph.json'); print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'graphify: Knowledge graph exists. Read graphify-out/GRAPH_REPORT.md before searching raw files.'}})) if d else None\""}
-      ]
-    }],
+    "PreToolUse": [
+      {
+        "matcher": "Glob|Grep|Read",
+        "hooks": [
+          {"type": "command", "command": "python3.14 -c \"import os,json; d=os.path.exists('graphify-out/graph.json'); d and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'graphify: graph exists — read graphify-out/GRAPH_REPORT.md before searching raw files.'}}))\""}
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace('\\\\','/'); b='.claude/memory' in p or 'MEMORY.md' in p; b and (print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'BLOCKED: use mcp__mempalace__mempalace_add_drawer, not .claude/memory/'}})) or sys.exit(2))\""}
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path',''); remind=p and any(p.endswith(x) for x in ('.py','.ts','.tsx','.js','.cs','.sql','.json','.yaml','.yml')); remind and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'Code edited — if this completes a bug fix, feature, or decision, call mcp__mempalace__mempalace_add_drawer now.'}}))\""}
+        ]
+      }
+    ],
     "SessionStart": [{
       "hooks": [
         {"type": "command", "command": "python3.11 -m mempalace hook run --hook session-start --harness claude-code"},
@@ -104,9 +120,11 @@ The hooks chain mempalace first, then the typed layer with `--no-mempalace-passt
 
 Hook behavior:
 
-- **PreToolUse** — before Glob/Grep, reminds Claude to check the knowledge graph
+- **PreToolUse / Glob|Grep|Read** — before any file search or read, reminds Claude to check `graphify-out/GRAPH_REPORT.md` first (only fires if the graph exists)
+- **PreToolUse / Write** — blocks writes to `.claude/memory/` or `MEMORY.md`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
+- **PostToolUse / Edit|Write** — after editing any code file (`.py`, `.ts`, `.js`, `.cs`, `.sql`, `.json`, `.yaml`, etc.), reminds Claude to save decisions to mempalace
 - **SessionStart** — mempalace loads prior context; typed layer injects top-3 summaries (~150 tokens)
-- **Stop** (every 15 messages) — mempalace saves raw memory; typed layer writes one summary drawer
+- **Stop** (every 15 messages) — mempalace saves raw memory; typed layer writes one summary drawer and records drawer count to `typed/budget.py`
 - **PreCompact** — read-only; surfaces pinned drawers before context compaction
 
 ### Step 6 — Configure MCP servers
@@ -200,19 +218,30 @@ This generates `graphify-out/graph.json`. Once built, the graphify MCP server st
 
 Set `SYNAPTIC_V2_SCOPE=MY-PROJECT` in the project's environment so hooks tag drawers to the correct project scope. Without this, scope falls back to the current folder name.
 
-### 4. Nightly consolidation cron (optional)
+### 4. Nightly consolidation cron
 
-Add one entry per project, daily at 1:00 AM:
+Reranks drawers by salience, detects contradictions, flags stale memories, archives zero-hit drawers older than 90 days, and syncs to graphify automatically.
+
+**Linux / macOS** — add to crontab (`crontab -e`):
 
 ```bash
-# Linux / macOS (crontab -e)
-0 1 * * * cd /path/to/your/project && python3.11 -c "from typed.consolidate import run_consolidation; run_consolidation()"
-
-# Windows (Task Scheduler)
-py -3.11 -c "from typed.consolidate import run_consolidation; run_consolidation()"
+0 1 * * * cd <synaptic-memory-path> && python3.11 -m typed.consolidate --synaptic-repo <synaptic-memory-path>
 ```
 
-This reranks drawers by salience, detects contradictions, flags stale memories, archives zero-hit drawers older than 90 days, and syncs to graphify automatically.
+**Windows** — run once in PowerShell (registers a persistent Task Scheduler entry):
+
+```powershell
+$action = New-ScheduledTaskAction `
+    -Execute "py.exe" `
+    -Argument '-3.11 -m typed.consolidate --synaptic-repo "<synaptic-memory-path>"' `
+    -WorkingDirectory "<synaptic-memory-path>"
+$trigger = New-ScheduledTaskTrigger -Daily -At 1:00AM
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+Register-ScheduledTask -TaskName "synaptic-memory-consolidate" `
+    -Action $action -Trigger $trigger -Settings $settings -Force
+```
+
+Replace `<synaptic-memory-path>` with your actual clone path. `StartWhenAvailable` ensures the task runs on next boot if the machine was asleep at 1am.
 
 ---
 
@@ -267,9 +296,16 @@ mark_correction(["drw_xxx"])  # auto-demotes to confidence=low after 2 hits
 
 **Token budget tracking:**
 
+Drawer counts are recorded automatically each time the Stop hook fires (via `stop_15msg.py` → `record_session()`). View the weekly report at any time:
+
+```bash
+python3.11 -m typed.budget          # show baseline + weekly targets
+```
+
+To also record token counts (not available from hooks automatically):
+
 ```bash
 python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "session"
-python3.11 -m typed.budget   # show baseline + targets
 ```
 
 ---

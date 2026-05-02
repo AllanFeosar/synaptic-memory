@@ -86,7 +86,7 @@ analysis, then renders the Obsidian wiki.
 
 ## Token math
 
-Per session (estimate — measure yours with `typed/budget.py`):
+Per session (estimate — drawer counts are auto-recorded each Stop hook; view with `python3.11 -m typed.budget`):
 
 | Path                 | Without v2 | With v2 | Δ           |
 |----------------------|------------|---------|-------------|

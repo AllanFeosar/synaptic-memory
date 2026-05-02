@@ -116,7 +116,7 @@ Untyped writes are rejected. This is the single biggest fix to retrieval quality
 
 ### Stop@15msgs hook
 
-Captures one `summary` drawer with the last 15 messages compressed. Does NOT capture individual decisions — those go through explicit `add_drawer` calls during the session.
+Captures one `summary` drawer with the last 15 messages compressed. Does NOT capture individual decisions — those go through explicit `add_drawer` calls during the session. Also records drawer count to `typed/budget.py` for token-savings tracking.
 
 ---
 
@@ -154,7 +154,7 @@ Never inject full drawer text into context unless Claude explicitly expands.
 
 ## 5. CONSOLIDATION (the sleep cycle)
 
-Runs as a 1am cron (or on-demand). This is where graphify earns its keep.
+Runs nightly at 1am via OS scheduler (crontab on Linux/macOS, Task Scheduler on Windows — see README Step 4). This is where graphify earns its keep.
 
 ```text
 1. python scripts/mempal_to_graphify.py

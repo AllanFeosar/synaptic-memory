@@ -20,6 +20,7 @@ _HERE = Path(__file__).resolve()
 _REPO_ROOT = _HERE.parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
+from typed.budget import record_session  # noqa: E402
 from typed.write import write_session_summary  # noqa: E402
 
 
@@ -63,6 +64,12 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"[typed] stop hook write failed: {e}\n")
         return 0  # never fail the session
+
+    try:
+        record_session(tokens_in=0, tokens_out=0, drawers_written=1)
+    except Exception:  # noqa: BLE001
+        pass  # budget tracking must never crash the hook
+
     return 0
 
 
