@@ -114,7 +114,7 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Glob|Grep|Read",
+        "matcher": "Glob|Grep",
         "hooks": [
           {"type": "command", "command": "python3.14 -c \"import os,json; d=os.path.exists('graphify-out/graph.json'); d and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'graphify: graph exists — read graphify-out/GRAPH_REPORT.md before searching raw files.'}}))\""}
         ]
@@ -122,7 +122,7 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
       {
         "matcher": "Write",
         "hooks": [
-          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace('\\\\','/'); b='.claude/memory' in p or 'MEMORY.md' in p; b and (print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'BLOCKED: use mcp__mempalace__mempalace_add_drawer, not .claude/memory/'}})) or sys.exit(2))\""}
+          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace('\\\\','/'); b='.claude/memory' in p; b and (print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'BLOCKED: use mcp__mempalace__mempalace_add_drawer, not .claude/memory/'}})) or sys.exit(2))\""}
         ]
       }
     ],
@@ -160,7 +160,7 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
 
 Hook behavior:
 
-- **PreToolUse / Glob|Grep|Read** — before any file search or read, reminds Claude to check `graphify-out/GRAPH_REPORT.md` first (only fires if graph exists)
+- **PreToolUse / Glob|Grep** — before any file search, reminds Claude to check `graphify-out/GRAPH_REPORT.md` first (only fires if graph exists)
 - **PreToolUse / Write** — blocks writes to `.claude/memory/` or `MEMORY.md`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
 - **PostToolUse / Edit|Write** — after editing any code file, reminds Claude to save decisions to mempalace
 - **SessionStart** — mempalace loads prior context; typed layer injects top-3 typed summaries (~150 tokens)
