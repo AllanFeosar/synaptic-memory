@@ -220,12 +220,23 @@ Set `SYNAPTIC_V2_SCOPE=MY-PROJECT` in the project's environment so hooks tag dra
 
 ### 4. Nightly consolidation cron
 
-Reranks drawers by salience, detects contradictions, flags stale memories, archives zero-hit drawers older than 90 days, and syncs to graphify automatically.
+One global cron entry — reads `SYNAPTIC_SCAN_ROOT` from `.mcp.json`'s graphify env block, discovers every project under that root with a built graphify graph, syncs each one, and opens a Notepad error log on Windows if anything fails. If `SYNAPTIC_SCAN_ROOT` is not set in `.mcp.json`, graphify sync is skipped entirely.
+
+Set the scan root once in `.mcp.json`:
+
+```json
+"graphify": {
+  "env": {
+    "SYNAPTIC_SCAN_ROOT": "/path/to/your/projects"
+  }
+}
+```
 
 **Linux / macOS** — add to crontab (`crontab -e`):
 
 ```bash
-0 1 * * * cd <synaptic-memory-path> && python3.11 -m typed.consolidate --synaptic-repo <synaptic-memory-path>
+0 1 * * * cd <synaptic-memory-path> && python3.11 -m typed.consolidate \
+    --synaptic-repo <synaptic-memory-path>
 ```
 
 **Windows** — run once in PowerShell (registers a persistent Task Scheduler entry):
@@ -241,7 +252,7 @@ Register-ScheduledTask -TaskName "synaptic-memory-consolidate" `
     -Action $action -Trigger $trigger -Settings $settings -Force
 ```
 
-Replace `<synaptic-memory-path>` with your actual clone path. `StartWhenAvailable` ensures the task runs on next boot if the machine was asleep at 1am.
+`StartWhenAvailable` ensures the task runs on next boot if the machine was asleep at 1am.
 
 ---
 

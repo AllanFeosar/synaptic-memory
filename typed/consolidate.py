@@ -1,4 +1,4 @@
-﻿"""
+"""
 Consolidation — the "sleep cycle". Runs nightly (or on demand).
 
 Steps:
@@ -7,8 +7,12 @@ Steps:
   3. Detect contradictions (high-similarity drawer pairs with opposing valences)
   4. Detect stale (drawers referencing files modified since last consolidate)
   5. Forget (archive zero-hit drawers older than 90 days)
-  6. Sync into graphify (delegated to existing mempal_to_graphify.py)
-  7. Emit a JSON report
+  6. Read SYNAPTIC_SCAN_ROOT from .mcp.json graphify env block — if set,
+     discover all projects under that root with graphify-out/graph.json
+     and scripts/mempal_to_graphify.py, then sync each one.
+     If not set, graphify sync is skipped entirely (no default).
+  7. Notify on errors (log file + Notepad popup on Windows)
+  8. Emit a JSON report
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -37,9 +42,22 @@ from typed.types import (
 # ---------------------------------------------------------------------------
 
 FORGET_AFTER_DAYS = 90
-CONTRADICTION_SIM_THRESHOLD = 0.88  # high similarity
-PIN_TOP_FRACTION = 0.05             # top 5% per scope auto-pinned
+CONTRADICTION_SIM_THRESHOLD = 0.88
+PIN_TOP_FRACTION = 0.05
 DEFAULT_REPORT_PATH = Path.home() / ".synaptic-memory" / "consolidate-report.json"
+DEFAULT_ERROR_LOG   = Path.home() / ".synaptic-memory" / "sync-errors.log"
+SCAN_MAX_DEPTH = 6
+
+# Directories to skip when scanning for projects
+_SKIP_DIRS = {
+    "node_modules", ".git", "__pycache__", "venv", ".venv", "env",
+    "dist", "build", ".tox", "graphify-out", ".claude", "site-packages",
+}
+if sys.platform == "win32":
+    _SKIP_DIRS |= {
+        "Windows", "Program Files", "Program Files (x86)", "$Recycle.Bin",
+        "System Volume Information", "ProgramData", "Recovery",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -57,25 +75,22 @@ class ConsolidateReport:
     contradictions: list[dict] = field(default_factory=list)
     marked_stale: list[str] = field(default_factory=list)
     archived: list[str] = field(default_factory=list)
-    graphify_synced: bool = False
+    projects_discovered: list[str] = field(default_factory=list)
+    projects_synced: list[str] = field(default_factory=list)
+    projects_failed: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def to_json(self) -> str:
-        d = asdict(self)
-        return json.dumps(d, indent=2, default=str)
+        return json.dumps(asdict(self), indent=2, default=str)
 
 
 # ---------------------------------------------------------------------------
-# Walk + load
+# Walk + load drawers
 # ---------------------------------------------------------------------------
 
 def _enumerate_drawers(client: MempalaceClient) -> list[tuple[str, TypedDrawer]]:
-    """Return [(mempalace_id, TypedDrawer)] for all v2 typed drawers."""
     typed: list[tuple[str, TypedDrawer]] = []
-
     for wing in client.list_wings():
-        # We sweep with a wide search ('*') to enumerate. Mempalace's search
-        # API may need a more specific query — we use the wing name as a fallback.
         hits = client.search(query=wing, top_k=10_000, wing=wing)
         for hit in hits:
             try:
@@ -127,12 +142,6 @@ def _detect_contradictions(
     client: MempalaceClient,
     report: ConsolidateReport,
 ) -> None:
-    """Pairs with high embedding similarity AND opposing types/valences.
-
-    Doesn't auto-resolve — flags for human review in the report.
-    """
-    # Embedding-pair detection: for each drawer, search top-k and look for
-    # high-similarity matches in opposing types or contradictory bodies.
     by_id = {d.drawer_id: (mid, d) for mid, d in items}
     seen_pairs: set[frozenset[str]] = set()
 
@@ -156,8 +165,6 @@ def _detect_contradictions(
             type_pair = (d.type, other.type)
             opposing = type_pair in _OPPOSING_TYPE_PAIRS or type_pair[::-1] in _OPPOSING_TYPE_PAIRS
 
-            # Same-type contradiction signal: both decisions, both high-confidence,
-            # but supersedence chain doesn't link them.
             same_type_conflict = (
                 d.type == other.type == DrawerType.DECISION
                 and d.confidence == Confidence.HIGH
@@ -180,7 +187,7 @@ def _detect_contradictions(
 # Stale detection
 # ---------------------------------------------------------------------------
 
-_FILE_REF_RE = __import__("re").compile(r"`([^`]+\.(?:py|ts|tsx|js|jsx|go|rs|java|md))`")
+_FILE_REF_RE = re.compile(r"`([^`]+\.(?:py|ts|tsx|js|jsx|go|rs|java|md))`")
 
 
 def _mark_stale_for_changed_files(
@@ -228,7 +235,6 @@ def _archive_old(
             continue
         if d.usage_count > 0:
             continue
-        # Move to archive wing by re-tagging scope. We don't delete.
         if d.scope.startswith("__archive__"):
             continue
         d.scope = f"__archive__{d.scope}"
@@ -240,26 +246,150 @@ def _archive_old(
 
 
 # ---------------------------------------------------------------------------
-# Graphify sync (delegate to existing script)
+# Read scan root from .mcp.json
 # ---------------------------------------------------------------------------
 
-def _sync_graphify(synaptic_repo: Optional[Path], report: ConsolidateReport) -> None:
-    if not synaptic_repo:
-        return
-    script = synaptic_repo / "scripts" / "mempal_to_graphify.py"
-    if not script.exists():
-        report.errors.append(f"graphify script not found: {script}")
-        return
+def _read_scan_root_from_mcp(synaptic_repo: Optional[Path] = None) -> Optional[Path]:
+    """Read SYNAPTIC_SCAN_ROOT from .mcp.json graphify env block.
+
+    Looks in synaptic_repo first, then CWD. Returns None if not configured —
+    caller should skip graphify sync entirely in that case.
+    """
+    candidates: list[Path] = []
+    if synaptic_repo:
+        candidates.append(synaptic_repo / ".mcp.json")
+    candidates.append(Path.cwd() / ".mcp.json")
+
+    for mcp_path in candidates:
+        if not mcp_path.exists():
+            continue
+        try:
+            data = json.loads(mcp_path.read_text(encoding="utf-8"))
+            val = (
+                data.get("mcpServers", {})
+                    .get("graphify", {})
+                    .get("env", {})
+                    .get("SYNAPTIC_SCAN_ROOT", "")
+            )
+            if val:
+                return Path(val)
+        except (json.JSONDecodeError, OSError):
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Project discovery
+# ---------------------------------------------------------------------------
+
+def _discover_projects(scan_root: Path, max_depth: int = SCAN_MAX_DEPTH) -> list[Path]:
+    """Walk scan_root and return every project root that has graphify-out/graph.json."""
+    found: list[Path] = []
+
+    def walk(path: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            for child in sorted(path.iterdir()):
+                if not child.is_dir():
+                    continue
+                if child.name in _SKIP_DIRS or child.name.startswith((".", "$")):
+                    continue
+                if (child / "graphify-out" / "graph.json").exists():
+                    found.append(child)
+                    # Don't recurse into a found project (no nested projects)
+                else:
+                    walk(child, depth + 1)
+        except PermissionError:
+            pass
+
+    walk(scan_root, 0)
+    return found
+
+
+# ---------------------------------------------------------------------------
+# Per-project graphify sync
+# ---------------------------------------------------------------------------
+
+def _sync_project_graph(
+    project_root: Path,
+    report: ConsolidateReport,
+) -> bool:
+    """Run mempal_to_graphify.py + graphify_wiki.py for one discovered project."""
+    bridge = project_root / "scripts" / "mempal_to_graphify.py"
+    wiki   = project_root / "scripts" / "graphify_wiki.py"
+
+    if not bridge.exists():
+        report.errors.append(
+            f"[{project_root.name}] scripts/mempal_to_graphify.py not found — skipped"
+        )
+        report.projects_failed.append(str(project_root))
+        return False
+
+    # Run bridge script
     try:
         result = subprocess.run(
-            ["py", "-3.14", str(script)],
+            ["py", "-3.11", str(bridge)],
             capture_output=True, text=True, timeout=300,
+            cwd=str(project_root),
         )
-        report.graphify_synced = result.returncode == 0
         if result.returncode != 0:
-            report.errors.append(f"graphify sync stderr: {result.stderr.strip()[:500]}")
+            report.errors.append(
+                f"[{project_root.name}] mempal_to_graphify failed: "
+                f"{result.stderr.strip()[:400]}"
+            )
+            report.projects_failed.append(str(project_root))
+            return False
     except subprocess.SubprocessError as e:
-        report.errors.append(f"graphify sync exception: {e}")
+        report.errors.append(f"[{project_root.name}] mempal_to_graphify exception: {e}")
+        report.projects_failed.append(str(project_root))
+        return False
+
+    # Run wiki rebuild (non-critical — failure doesn't fail the project)
+    if wiki.exists():
+        try:
+            subprocess.run(
+                ["py", "-3.14", str(wiki), "--clean"],
+                capture_output=True, text=True, timeout=120,
+                cwd=str(project_root),
+            )
+        except subprocess.SubprocessError:
+            pass
+
+    report.projects_synced.append(str(project_root))
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Error notification
+# ---------------------------------------------------------------------------
+
+def _notify_errors(errors: list[str], log_path: Path) -> None:
+    """Write errors to log file. On Windows, open Notepad so you see it next morning."""
+    if not errors:
+        return
+
+    timestamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    lines = [
+        f"=== synaptic-memory consolidation errors — {timestamp} ===",
+        "",
+    ]
+    lines.extend(f"  {e}" for e in errors)
+    lines.append("")
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("\n".join(lines), encoding="utf-8")
+
+    if sys.platform == "win32":
+        try:
+            subprocess.Popen(["notepad", str(log_path)])
+        except FileNotFoundError:
+            # Notepad not found — try cmd popup as fallback
+            try:
+                msg = f"synaptic-memory: {len(errors)} sync error(s). See {log_path}"
+                subprocess.Popen(["cmd", "/c", f"echo {msg} & pause"], creationflags=0x00000010)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +400,7 @@ def consolidate(
     *,
     repo_root: Optional[Path] = None,
     synaptic_repo: Optional[Path] = None,
+    scan_root: Optional[Path] = None,
     report_path: Path = DEFAULT_REPORT_PATH,
     client: Optional[MempalaceClient] = None,
 ) -> ConsolidateReport:
@@ -277,7 +408,7 @@ def consolidate(
     client = client or InProcessClient()
     report = ConsolidateReport(started_at=_dt.datetime.now(_dt.timezone.utc).isoformat())
 
-    # Load last-run timestamp for stale detection.
+    # Load last-run timestamp for stale detection
     last_consolidate: Optional[_dt.datetime] = None
     if report_path.exists():
         try:
@@ -286,6 +417,7 @@ def consolidate(
         except (ValueError, KeyError, json.JSONDecodeError):
             last_consolidate = None
 
+    # --- mempalace health (global, runs once) ---
     items = _enumerate_drawers(client)
     report.drawers_scanned = len(items)
     report.drawers_typed = len(items)
@@ -294,12 +426,25 @@ def consolidate(
     _detect_contradictions(items, client, report)
     _mark_stale_for_changed_files(items, repo_root, last_consolidate, client, report)
     _archive_old(items, client, report)
-    _sync_graphify(synaptic_repo, report)
+
+    # --- per-project graphify sync ---
+    if scan_root and scan_root.exists():
+        projects = _discover_projects(scan_root)
+        report.projects_discovered = [str(p) for p in projects]
+        for proj in projects:
+            _sync_project_graph(proj, report)
+    else:
+        # Fallback: sync the synaptic-memory repo itself (old behavior)
+        if synaptic_repo and (synaptic_repo / "scripts" / "mempal_to_graphify.py").exists():
+            _sync_project_graph(synaptic_repo, report)
 
     report.finished_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report.to_json())
+
+    _notify_errors(report.errors, DEFAULT_ERROR_LOG)
+
     return report
 
 
@@ -312,20 +457,18 @@ def main() -> int:
     p = argparse.ArgumentParser(description="typed consolidation cron")
     p.add_argument("--repo-root", type=Path, default=None,
                    help="Root of the project being consolidated (used for stale detection).")
-    p.add_argument("--synaptic-repo", type=Path,
-                   default=Path(os.environ.get("SYNAPTIC_REPO", "")),
-                   help="Path to synaptic-memory repo (for graphify script).")
+    p.add_argument("--synaptic-repo", type=Path, default=None,
+                   help="Path to synaptic-memory repo (used to locate .mcp.json for scan root).")
     p.add_argument("--report", type=Path, default=DEFAULT_REPORT_PATH)
-    p.add_argument("--dry-run", action="store_true", help="Skip mutations; print plan only.")
     args = p.parse_args()
 
-    if args.dry_run:
-        sys.stderr.write("[typed] dry-run mode not yet implemented\n")
-        return 1
+    synaptic_repo = args.synaptic_repo if args.synaptic_repo and args.synaptic_repo.exists() else None
+    scan_root = _read_scan_root_from_mcp(synaptic_repo)
 
     report = consolidate(
         repo_root=args.repo_root,
-        synaptic_repo=args.synaptic_repo if args.synaptic_repo and args.synaptic_repo.exists() else None,
+        synaptic_repo=synaptic_repo,
+        scan_root=scan_root,
         report_path=args.report,
     )
     sys.stdout.write(report.to_json())
@@ -335,5 +478,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

@@ -32,6 +32,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -100,7 +102,6 @@ def mine_memory_into_palace(memory_dir: Path, wing: str) -> None:
     Tags all Claude memory files for this project into ChromaDB.
     Copies mempalace.yaml into memory_dir first (required by mempalace mine).
     """
-    import subprocess, shutil
     # mempalace mine requires mempalace.yaml in the target dir
     # Look in project root first, then mempalace-refs/ as fallback
     yaml_src = PROJECT_ROOT / "mempalace.yaml"
@@ -171,7 +172,7 @@ def query_palace_by_wing(palace_path: Path, wing: str) -> list[dict]:
 def build_code_label_index(graph: dict) -> dict[str, str]:
     """
     Returns {label: node_id} for all code nodes with label length > 4.
-    Excludes file path labels (contain / or \) and purely numeric labels.
+    Excludes file path labels (contain / or \\) and purely numeric labels.
     """
     index = {}
     for n in graph["nodes"]:
@@ -283,7 +284,7 @@ def run_graphify() -> None:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             break
-        if "No module named" not in result.stderr:
+        if result and "No module named" not in (result.stderr or ""):
             break  # real error, stop trying
 
     if result and result.returncode == 0:

@@ -154,13 +154,15 @@ Never inject full drawer text into context unless Claude explicitly expands.
 
 ## 5. CONSOLIDATION (the sleep cycle)
 
-Runs nightly at 1am via OS scheduler (crontab on Linux/macOS, Task Scheduler on Windows — see README Step 4). This is where graphify earns its keep.
+Runs nightly at 1am via OS scheduler (crontab on Linux/macOS, Task Scheduler on Windows — see README Step 4). One global cron entry: `typed/consolidate.py` reads `SYNAPTIC_SCAN_ROOT` from `.mcp.json`'s graphify env block, auto-discovers every project under that root with a built graphify graph, and syncs each one. If `SYNAPTIC_SCAN_ROOT` is not set, graphify sync is skipped. Errors are written to `~/.synaptic-memory/sync-errors.log` and surfaced via Notepad on Windows.
 
 ```text
-1. python scripts/mempal_to_graphify.py
-   — Pull new drawers since last sync
-   — Generate semantic edges between drawers (cosine similarity, NOT keyword match)
-   — Update graphify nodes; rebuild GRAPH_REPORT.md
+1. Read SYNAPTIC_SCAN_ROOT from .mcp.json graphify env — if not set, skip graphify sync
+   Discover all projects under that root with graphify-out/graph.json
+   For each project found:
+   — Run scripts/mempal_to_graphify.py from that project root
+   — Run scripts/graphify_wiki.py --clean from that project root
+   — Record success/failure per project; notify on errors
 
 2. Rerank salience
    — salience = (usage_count × 2) + recency_decay + (pin_status × 5)

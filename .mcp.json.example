@@ -12,7 +12,9 @@
       "type": "stdio",
       "command": "python3.14",
       "args": ["-m", "graphify.serve", "graphify-out/graph.json"],
-      "env": {}
+      "env": {
+        "SYNAPTIC_SCAN_ROOT": "<your-projects-root>"
+      }
     }
   }
 }

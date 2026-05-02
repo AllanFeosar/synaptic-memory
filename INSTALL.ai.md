@@ -32,8 +32,11 @@ Ask:
    - `project_slug` — partial match against the Claude Code project folder (e.g. `my-app`)
    - `wing` — short unique tag for this project in ChromaDB (e.g. `my-app`)
 4. **Clone location**: Where to clone mempalace, graphify, and synaptic-memory? (e.g. `/home/user/repos/`)
+5. **Scan root**: Which root directory contains all your projects? (e.g. `E:\` or `/home/user/projects`)
+   - The nightly consolidation cron reads this from `.mcp.json` — set once in the graphify env block and it works everywhere
+   - On Windows this is typically a drive letter like `E:\`; on Linux/macOS a folder like `/home/user/projects`
 
-Record the answers — you will use them in Steps 1–7.
+Record the answers — you will use them in Steps 1–8b.
 
 ---
 
@@ -277,17 +280,30 @@ Tell the user:
 
 ---
 
-## Step 8b — Schedule the nightly consolidation cron
+## Step 8b — Configure scan root and schedule the nightly consolidation cron
 
-This reranks drawers by salience, detects contradictions, flags stale memories, archives zero-hit drawers older than 90 days, and syncs to graphify.
+**First — set the scan root in `.mcp.json`** (from Step 6), using the answer from Step 0 question 5:
+
+```json
+"graphify": {
+  "env": {
+    "SYNAPTIC_SCAN_ROOT": "<scan-root>"
+  }
+}
+```
+
+This is the only place the scan root is configured. The cron reads it from here — no separate config file or environment variable needed. If `SYNAPTIC_SCAN_ROOT` is not set, graphify sync is skipped entirely.
+
+**Then — register the cron** (one global entry covers all projects):
 
 **Linux / macOS** — add to crontab (`crontab -e`):
 
 ```bash
-0 1 * * * cd <synaptic-memory-path> && python3.11 -m typed.consolidate --synaptic-repo <synaptic-memory-path>
+0 1 * * * cd <synaptic-memory-path> && python3.11 -m typed.consolidate \
+    --synaptic-repo <synaptic-memory-path>
 ```
 
-**Windows** — run this once in PowerShell. It registers a persistent Task Scheduler entry:
+**Windows** — run this once in PowerShell:
 
 ```powershell
 $action = New-ScheduledTaskAction `
@@ -306,6 +322,13 @@ Verify it was registered:
 Get-ScheduledTask -TaskName "synaptic-memory-consolidate"
 # Expected State: Ready
 ```
+
+What the cron does per project found under the scan root:
+
+1. Checks for `scripts/mempal_to_graphify.py` in that project root
+2. Runs it → injects memories into `graphify-out/graph.json`
+3. Runs `scripts/graphify_wiki.py --clean` → refreshes Obsidian wiki
+4. Any failures are written to `~/.synaptic-memory/sync-errors.log` and opened in Notepad
 
 ---
 

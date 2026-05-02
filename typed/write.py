@@ -90,10 +90,7 @@ def write_drawer(
                 raise DuplicateDrawerError(hits[0].drawer_id, hits[0].score)
 
     if supersedes:
-        # Best-effort validation: try to find the superseded drawer by id.
-        # Done lazily — no hard fail if not found, just log via stderr.
-        # (In production wire this to your logging layer.)
-        pass
+        pass  # validation deferred — consolidate.py catches conflicts via contradiction detection
 
     serialized = serialize_drawer(drawer)
     client.add_drawer(

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import abc
 import hashlib
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -83,7 +84,6 @@ class InProcessClient(MempalaceClient):
             # Bootstrap directly, then let mempalace open it normally.
             if not create or "does not exist" not in str(exc):
                 raise
-            import os
             import chromadb
             os.makedirs(self._palace_path, exist_ok=True)
             _client = chromadb.PersistentClient(path=self._palace_path)
