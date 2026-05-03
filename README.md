@@ -454,6 +454,31 @@ The full stack is implemented and running:
 
 **The next 90 days are a testing and hardening period.** Real-world usage across multiple projects will surface edge cases, performance issues, and UX friction before a public release.
 
+### Planned — memory model improvements (post-testing)
+
+After reviewing comparable systems ([resonantlabsai/synaptic](https://github.com/resonantlabsai/synaptic), [mikejaklitsch/synaptic](https://github.com/mikejaklitsch/synaptic), [jvanmelckebeke/mcp-synaptic](https://github.com/jvanmelckebeke/mcp-synaptic)), three features stand out as high-value additions to the `typed/` layer — all implementable without touching mempalace:
+
+#### 1. Spreading activation retrieval
+
+Currently `mempalace_search` returns direct semantic matches. Spreading activation would ripple a query outward through the knowledge graph — surfacing related drawers you didn't ask for directly. Useful for "what else is connected to this decision?" style lookups during SessionStart injection.
+
+#### 2. Exponential decay / half-life
+
+Our current archive policy is a hard 90-day cutoff for zero-hit drawers. Decay math would instead continuously reduce a drawer's salience score based on age and access frequency — memories fade naturally unless reinforced, matching how real memory works. Drawers that keep getting cited stay alive indefinitely; unused ones fade out gracefully.
+
+#### 3. TTL-tiered expiration
+
+An explicit four-tier system on top of decay:
+
+| Tier | Lifespan | Use case |
+| --- | --- | --- |
+| `ephemeral` | Session only | Scratch notes, temp context |
+| `short-term` | 7 days | Bug investigations, sprint context |
+| `long-term` | 90 days | Feature decisions, patterns |
+| `permanent` | Never expires | Architecture decisions, core recipes |
+
+These are all addable to `typed/write.py` and `typed/consolidate.py` — no changes to mempalace or graphify needed.
+
 ### Planned — installer (after 90-day testing window)
 
 After the testing period, synaptic-memory will be packaged as a proper installer — the goal is a single command that sets up the full stack:
