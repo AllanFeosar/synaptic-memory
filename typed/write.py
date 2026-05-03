@@ -1,8 +1,8 @@
-﻿"""
+"""
 Typed write API.
 
 Replaces direct `mempalace_add_drawer` calls. Enforces:
-  - required type tuple {type, scope, confidence}
+  - required type tuple {type, scope, confidence, tier}
   - embedding-based duplicate detection (cosine via mempalace_search)
   - supersedes chain validation
 
@@ -17,6 +17,7 @@ from typed.client import InProcessClient, MempalaceClient
 from typed.types import (
     Confidence,
     DrawerType,
+    MemoryTier,
     TypedDrawer,
     parse_drawer,
     serialize_drawer,
@@ -53,6 +54,7 @@ def write_drawer(
     scope: str,
     confidence: Confidence | str,
     body: str,
+    tier: MemoryTier | str = MemoryTier.LONG_TERM,
     supersedes: Optional[str] = None,
     pinned: bool = False,
     client: Optional[MempalaceClient] = None,
@@ -72,25 +74,19 @@ def write_drawer(
         scope=scope,
         confidence=confidence,
         body=body,
+        tier=tier,
         supersedes=supersedes,
         pinned=pinned,
     )
 
     if not skip_dupe_check:
-        # Use mempalace search at high threshold instead of patching mempalace's
-        # check_duplicate (which is content-hash based and misses semantic dupes).
         hits = client.search(query=drawer.body, top_k=1, wing=_wing_for(scope))
         if hits and hits[0].score >= dupe_threshold:
-            # Try to parse existing drawer to extract its drawer_id from frontmatter
             try:
                 existing = parse_drawer(hits[0].content)
                 raise DuplicateDrawerError(existing.drawer_id, hits[0].score)
             except ValueError:
-                # Untyped drawer — fall back to mempalace's id
                 raise DuplicateDrawerError(hits[0].drawer_id, hits[0].score)
-
-    if supersedes:
-        pass  # validation deferred — consolidate.py catches conflicts via contradiction detection
 
     serialized = serialize_drawer(drawer)
     client.add_drawer(
@@ -102,7 +98,7 @@ def write_drawer(
 
 
 # ---------------------------------------------------------------------------
-# Convenience helpers for common drawer types
+# Convenience helpers — sensible tier defaults per drawer type
 # ---------------------------------------------------------------------------
 
 def write_decision(
@@ -110,6 +106,7 @@ def write_decision(
     body: str,
     *,
     confidence: Confidence | str = Confidence.HIGH,
+    tier: MemoryTier | str = MemoryTier.LONG_TERM,
     supersedes: Optional[str] = None,
     client: Optional[MempalaceClient] = None,
 ) -> TypedDrawer:
@@ -118,6 +115,7 @@ def write_decision(
         scope=scope,
         confidence=confidence,
         body=body,
+        tier=tier,
         supersedes=supersedes,
         client=client,
     )
@@ -130,13 +128,16 @@ def write_anti_pattern(
     confidence: Confidence | str = Confidence.HIGH,
     client: Optional[MempalaceClient] = None,
 ) -> TypedDrawer:
+    # Anti-patterns are permanent — a mistake that burned you once should
+    # never quietly expire and surprise you again.
     return write_drawer(
         type=DrawerType.ANTI_PATTERN,
         scope=scope,
         confidence=confidence,
         body=body,
+        tier=MemoryTier.PERMANENT,
         client=client,
-        pinned=True,  # anti-patterns are surfaced aggressively
+        pinned=True,
     )
 
 
@@ -146,11 +147,30 @@ def write_recipe(
     *,
     client: Optional[MempalaceClient] = None,
 ) -> TypedDrawer:
+    # Recipes are procedural knowledge — permanent so they're always available.
     return write_drawer(
         type=DrawerType.RECIPE,
         scope=scope,
         confidence=Confidence.HIGH,
         body=body,
+        tier=MemoryTier.PERMANENT,
+        client=client,
+    )
+
+
+def write_postmortem(
+    scope: str,
+    body: str,
+    *,
+    confidence: Confidence | str = Confidence.HIGH,
+    client: Optional[MempalaceClient] = None,
+) -> TypedDrawer:
+    return write_drawer(
+        type=DrawerType.POSTMORTEM,
+        scope=scope,
+        confidence=confidence,
+        body=body,
+        tier=MemoryTier.LONG_TERM,
         client=client,
     )
 
@@ -161,14 +181,13 @@ def write_session_summary(
     *,
     client: Optional[MempalaceClient] = None,
 ) -> TypedDrawer:
-    """For Stop@15msgs hook — summary tier."""
+    """For Stop@15msgs hook — short-term tier, no dupe check."""
     return write_drawer(
         type=DrawerType.SUMMARY,
         scope=scope,
         confidence=Confidence.MEDIUM,
         body=body,
+        tier=MemoryTier.SHORT_TERM,
         client=client,
         skip_dupe_check=True,  # summaries are time-tagged; dedupe is noise
     )
-
-

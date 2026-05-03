@@ -192,15 +192,20 @@ class MockClient(MempalaceClient):
         return did
 
     def search(self, query: str, top_k: int = 3, wing: Optional[str] = None) -> list[SearchHit]:
-        q = query.lower()
+        q_tokens = set(query.lower().split())
         hits = []
         for did, (w, r, content) in self.store.items():
             if wing and w != wing:
                 continue
-            score = sum(1 for tok in q.split() if tok in content.lower())
-            if score == 0:
+            c_tokens = set(content.lower().split())
+            overlap = len(q_tokens & c_tokens)
+            if overlap == 0:
                 continue
-            hits.append(SearchHit(drawer_id=did, content=content, score=float(score), wing=w, room=r))
+            # Recall-based score in [0.0, 1.0]: fraction of query tokens found in content.
+            # Mirrors real embedding behavior — querying a body against its own serialized
+            # content (body + frontmatter) yields 1.0 so dupe detection fires correctly.
+            score = overlap / max(len(q_tokens), 1)
+            hits.append(SearchHit(drawer_id=did, content=content, score=round(score, 3), wing=w, room=r))
         hits.sort(key=lambda h: -h.score)
         return hits[:top_k]
 

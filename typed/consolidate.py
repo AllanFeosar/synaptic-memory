@@ -31,6 +31,7 @@ from typed.client import InProcessClient, MempalaceClient
 from typed.types import (
     Confidence,
     DrawerType,
+    MemoryTier,
     TypedDrawer,
     parse_drawer,
     serialize_drawer,
@@ -226,17 +227,36 @@ def _archive_old(
     client: MempalaceClient,
     report: ConsolidateReport,
 ) -> None:
+    """Archive drawers that have exceeded their tier TTL.
+
+    Tier TTLs:
+        ephemeral  — 1 day  (archived even if used; scratch notes)
+        short-term — 7 days (archived if zero hits)
+        long-term  — 90 days (archived if zero hits)
+        permanent  — never archived
+
+    Pinned drawers are always exempt regardless of tier.
+    """
     now = _dt.datetime.now(_dt.timezone.utc)
     for mid, d in items:
         if d.pinned:
             continue
-        age_days = (now - d.created_at).total_seconds() / 86400.0
-        if age_days < FORGET_AFTER_DAYS:
-            continue
-        if d.usage_count > 0:
-            continue
         if d.scope.startswith("__archive__"):
             continue
+
+        ttl = d.tier.ttl_days
+        if ttl is None:
+            continue  # permanent — never archive
+
+        age_days = (now - d.created_at).total_seconds() / 86400.0
+        if age_days < ttl:
+            continue
+
+        # Ephemeral drawers expire regardless of usage (they're scratch notes).
+        # All other tiers survive if they have been used at least once.
+        if d.tier != MemoryTier.EPHEMERAL and d.usage_count > 0:
+            continue
+
         d.scope = f"__archive__{d.scope}"
         try:
             client.update_drawer(mid, serialize_drawer(d))

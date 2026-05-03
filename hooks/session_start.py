@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 SessionStart hook — wraps mempalace's existing hook + adds v2 read protocol.
 
@@ -18,6 +18,10 @@ initial context. Token budget: ~150 tokens for top-3 summaries.
 
 Stays additive — does NOT replace the mempalace hook output. If the existing
 hook prints anything, both are concatenated.
+
+Graphify integration: if graphify-out/graph.json exists in cwd, spreading
+activation automatically uses graphify structural edges to surface code-linked
+memories. No config needed — it degrades gracefully if graph.json is absent.
 """
 
 from __future__ import annotations
@@ -33,7 +37,8 @@ _HERE = Path(__file__).resolve()
 _REPO_ROOT = _HERE.parents[1]  # hooks/session_start.py -> repo
 sys.path.insert(0, str(_REPO_ROOT))
 
-from typed.read import inject_session_start  # noqa: E402
+from typed.graphify_client import LocalGraphifyClient  # noqa: E402
+from typed.read import inject_session_start            # noqa: E402
 
 
 def detect_scope() -> str:
@@ -90,9 +95,18 @@ def main() -> int:
             if not passthrough.endswith("\n"):
                 sys.stdout.write("\n")
 
-    # 2. Add v2 typed-drawer summaries on top.
+    # 2. Auto-detect graphify graph for this project (zero config).
+    #    Looks for graphify-out/graph.json in cwd. Returns None if absent —
+    #    spreading activation degrades gracefully to mempalace-only.
+    graphify_client = LocalGraphifyClient.from_cwd()
+
+    # 3. Add v2 typed-drawer summaries (mempalace + graphify hops if available).
     try:
-        block = inject_session_start(scope=scope, intent_hint=intent)
+        block = inject_session_start(
+            scope=scope,
+            intent_hint=intent,
+            graphify_client=graphify_client,
+        )
         if block:
             sys.stdout.write(block)
             sys.stdout.write("\n")
@@ -104,6 +118,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-

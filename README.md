@@ -85,13 +85,20 @@ The hooks chain mempalace first, then the typed layer with `--no-mempalace-passt
         "hooks": [
           {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace('\\\\','/'); b='.claude/memory' in p; b and (print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'BLOCKED: use mcp__mempalace__mempalace_add_drawer, not .claude/memory/'}})) or sys.exit(2))\""}
         ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/pre_tool_read.py\""}
+        ]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
         "hooks": [
-          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path',''); remind=p and any(p.endswith(x) for x in ('.py','.ts','.tsx','.js','.cs','.sql','.json','.yaml','.yml')); remind and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'Code edited — if this completes a bug fix, feature, or decision, call mcp__mempalace__mempalace_add_drawer now.'}}))\""}
+          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path',''); remind=p and any(p.endswith(x) for x in ('.py','.ts','.tsx','.js','.cs','.sql','.json','.yaml','.yml')); remind and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'Code edited — if this completes a bug fix, feature, or decision, call mcp__mempalace__mempalace_add_drawer now.'}}))\""},
+          {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/post_tool_edit.py\""}
         ]
       }
     ],
@@ -122,11 +129,12 @@ The hooks chain mempalace first, then the typed layer with `--no-mempalace-passt
 Hook behavior:
 
 - **PreToolUse / Glob|Grep** — before any file search, reminds Claude to check `graphify-out/GRAPH_REPORT.md` first (only fires if the graph exists)
-- **PreToolUse / Write** — blocks writes to `.claude/memory/` or `MEMORY.md`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
-- **PostToolUse / Edit|Write** — after editing any code file (`.py`, `.ts`, `.js`, `.cs`, `.sql`, `.json`, `.yaml`, etc.), reminds Claude to save decisions to mempalace
-- **SessionStart** — mempalace loads prior context; typed layer injects top-3 summaries (~150 tokens)
+- **PreToolUse / Write** — blocks writes to `.claude/memory/`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
+- **PreToolUse / Read** — before reading a file, queries graphify for that file's node + neighbors, searches mempalace for related memories, injects them as context. Silent if no graph or no memories found.
+- **PostToolUse / Edit|Write** — after editing a code file: (1) reminds Claude to save decisions to mempalace, (2) queries graphify for structurally linked files that may also need updating, (3) surfaces related memories about those neighbors
+- **SessionStart** — mempalace loads prior context; typed layer runs spreading activation search (mempalace + graphify hops) and injects top-3 drawer summaries (~150 tokens)
 - **Stop** (every 15 messages) — mempalace saves raw memory; typed layer writes one summary drawer and records drawer count to `typed/budget.py`
-- **PreCompact** — read-only; surfaces pinned drawers before context compaction
+- **PreCompact** — highest-stakes retrieval moment; runs spreading activation + graphify hops to surface pinned drawers + high-salience related memories before context compaction
 
 ### Step 6 — Configure MCP servers
 
@@ -407,9 +415,11 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 | `.mcp.json` | No (gitignored) | Your local MCP config with real paths |
 | `mempalace.project.json` | No (gitignored) | Your local per-project config |
 | `mempalace.yaml` | No (gitignored) | Your local room definitions |
-| `hooks/session_start.py` | Yes | SessionStart hook |
-| `hooks/stop_15msg.py` | Yes | Stop hook (every 15 messages) |
-| `hooks/pre_compact.py` | Yes | PreCompact hook (read-only) |
+| `hooks/session_start.py` | Yes | SessionStart hook — spreading activation + graphify |
+| `hooks/stop_15msg.py` | Yes | Stop hook (every 15 messages) — write-only |
+| `hooks/pre_compact.py` | Yes | PreCompact hook — spreading activation + graphify before compaction |
+| `hooks/pre_tool_read.py` | Yes | PreToolUse/Read hook — file-targeted memory injection |
+| `hooks/post_tool_edit.py` | Yes | PostToolUse/Edit hook — graphify neighbor surfacing after edits |
 | `scripts/mempal_to_graphify.py` | Yes | Bridge: mine ChromaDB → inject into graphify |
 | `scripts/graphify_wiki.py` | Yes | Obsidian wiki generator |
 | `typed/` | Yes | Typed memory package (types, write, read, consolidate, telemetry, budget) |
@@ -447,37 +457,40 @@ The full stack is implemented and running:
 
 - mempalace (ChromaDB) + typed layer — storing and retrieving memory across sessions
 - graphify — building code knowledge graphs with community detection
-- Claude Code hooks — SessionStart, Stop, PreCompact, PreToolUse, PostToolUse all wired
+- Claude Code hooks — SessionStart, Stop, PreCompact, PreToolUse/Read, PostToolUse/Edit all wired
 - Nightly consolidation cron — auto-pinning, contradiction detection, stale flagging, multi-project sync
 - `.graphifyignore` — per-project file exclusion
 - Obsidian wiki — human-readable graph visualization
+- Spreading activation retrieval — mempalace + graphify structural hops at every read moment
+- Exponential decay / half-life salience — per-tier decay curves replace hard TTL cutoffs
+- TTL-tiered expiration — EPHEMERAL (1d), SHORT_TERM (7d), LONG_TERM (90d), PERMANENT tiers
 
 **The next 90 days are a testing and hardening period.** Real-world usage across multiple projects will surface edge cases, performance issues, and UX friction before a public release.
 
-### Planned — memory model improvements (post-testing)
+### Implemented — memory model improvements
 
-After reviewing comparable systems ([resonantlabsai/synaptic](https://github.com/resonantlabsai/synaptic), [mikejaklitsch/synaptic](https://github.com/mikejaklitsch/synaptic), [jvanmelckebeke/mcp-synaptic](https://github.com/jvanmelckebeke/mcp-synaptic)), three features stand out as high-value additions to the `typed/` layer — all implementable without touching mempalace:
+After reviewing comparable systems ([resonantlabsai/synaptic](https://github.com/resonantlabsai/synaptic), [mikejaklitsch/synaptic](https://github.com/mikejaklitsch/synaptic), [jvanmelckebeke/mcp-synaptic](https://github.com/jvanmelckebeke/mcp-synaptic)), three features were added to the `typed/` layer without touching mempalace:
 
 #### 1. Spreading activation retrieval
 
-Currently `mempalace_search` returns direct semantic matches. Spreading activation would ripple a query outward through the knowledge graph — surfacing related drawers you didn't ask for directly. Useful for "what else is connected to this decision?" style lookups during SessionStart injection.
+`spreading_activation_search()` in `typed/read.py` seeds from semantic matches then ripples outward through related drawers. When `graphify-out/graph.json` exists, each hop also extracts file/code references from drawer bodies and queries graphify for structural neighbors — memories about those neighboring files surface automatically. Used at SessionStart, PreCompact, PreToolUse/Read, and PostToolUse/Edit.
 
 #### 2. Exponential decay / half-life
 
-Our current archive policy is a hard 90-day cutoff for zero-hit drawers. Decay math would instead continuously reduce a drawer's salience score based on age and access frequency — memories fade naturally unless reinforced, matching how real memory works. Drawers that keep getting cited stay alive indefinitely; unused ones fade out gracefully.
+`salience()` in `typed/types.py` uses `exp(-ln2 * age_days / half_life)` per tier. Permanent drawers never decay. Ephemeral drawers (half-life 0.5 days) drop to near-zero in hours. Replaces flat recency scoring — drawers that keep getting cited stay ranked high indefinitely.
 
 #### 3. TTL-tiered expiration
 
-An explicit four-tier system on top of decay:
+Four explicit tiers in `MemoryTier` (typed/types.py), driving both `salience()` decay and `_archive_old()` in `typed/consolidate.py`:
 
-| Tier | Lifespan | Use case |
-| --- | --- | --- |
-| `ephemeral` | Session only | Scratch notes, temp context |
-| `short-term` | 7 days | Bug investigations, sprint context |
-| `long-term` | 90 days | Feature decisions, patterns |
-| `permanent` | Never expires | Architecture decisions, core recipes |
+| Tier | TTL | Half-life | Use case |
+| --- | --- | --- | --- |
+| `ephemeral` | 1 day | 0.5 days | Scratch notes, temp context — archived even if used |
+| `short-term` | 7 days | 3.5 days | Bug investigations, sprint context |
+| `long-term` | 90 days | 45 days | Feature decisions, patterns (default) |
+| `permanent` | Never | Never | Architecture decisions, core recipes |
 
-These are all addable to `typed/write.py` and `typed/consolidate.py` — no changes to mempalace or graphify needed.
+Pinned drawers are always exempt from archiving regardless of tier.
 
 ### Planned — installer (after 90-day testing window)
 

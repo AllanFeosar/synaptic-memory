@@ -1,4 +1,4 @@
-﻿"""
+"""
 Drawer types + schema + frontmatter (de)serialization.
 
 Strategy: encode the typed tuple as YAML frontmatter prepended to drawer
@@ -12,6 +12,7 @@ A typed drawer looks like:
     type: decision
     scope: auth
     confidence: high
+    tier: long-term
     supersedes: drw_20260315_d33b
     created_at: 2026-04-30T14:00:00+00:00
     usage_count: 0
@@ -30,6 +31,7 @@ import dataclasses
 import datetime as _dt
 import enum
 import hashlib
+import math
 import re
 from typing import Any, Optional
 
@@ -61,6 +63,44 @@ class Confidence(str, enum.Enum):
         return cls(raw.strip().lower())
 
 
+class MemoryTier(str, enum.Enum):
+    """TTL tier controlling expiry and exponential decay half-life.
+
+    EPHEMERAL  — session scratch notes; auto-archived after 1 day.
+    SHORT_TERM — sprint/investigation context; 7-day TTL.
+    LONG_TERM  — feature decisions and patterns; 90-day TTL (default).
+    PERMANENT  — architecture decisions and recipes; never expires.
+    """
+    EPHEMERAL  = "ephemeral"
+    SHORT_TERM = "short-term"
+    LONG_TERM  = "long-term"
+    PERMANENT  = "permanent"
+
+    @classmethod
+    def parse(cls, raw: str) -> "MemoryTier":
+        return cls(raw.strip().lower())
+
+    @property
+    def ttl_days(self) -> Optional[float]:
+        """Hard expiry in days. None = permanent, never archived by TTL."""
+        return {
+            MemoryTier.EPHEMERAL:  1.0,
+            MemoryTier.SHORT_TERM: 7.0,
+            MemoryTier.LONG_TERM:  90.0,
+            MemoryTier.PERMANENT:  None,
+        }[self]
+
+    @property
+    def half_life_days(self) -> Optional[float]:
+        """Exponential decay half-life. None = permanent, no decay."""
+        return {
+            MemoryTier.EPHEMERAL:  0.5,
+            MemoryTier.SHORT_TERM: 3.5,
+            MemoryTier.LONG_TERM:  45.0,
+            MemoryTier.PERMANENT:  None,
+        }[self]
+
+
 # ---------------------------------------------------------------------------
 # Drawer model
 # ---------------------------------------------------------------------------
@@ -83,6 +123,7 @@ class TypedDrawer:
     body: str
 
     # Optional / defaulted
+    tier: MemoryTier = MemoryTier.LONG_TERM
     supersedes: Optional[str] = None
     created_at: _dt.datetime = dataclasses.field(default_factory=lambda: _dt.datetime.now(_dt.timezone.utc))
     usage_count: int = 0
@@ -108,6 +149,7 @@ class TypedDrawer:
         scope: str,
         confidence: Confidence | str,
         body: str,
+        tier: MemoryTier | str = MemoryTier.LONG_TERM,
         supersedes: Optional[str] = None,
         pinned: bool = False,
     ) -> "TypedDrawer":
@@ -118,6 +160,7 @@ class TypedDrawer:
 
         type_enum = type if isinstance(type, DrawerType) else DrawerType.parse(type)
         conf_enum = confidence if isinstance(confidence, Confidence) else Confidence.parse(confidence)
+        tier_enum = tier if isinstance(tier, MemoryTier) else MemoryTier.parse(tier)
         ts = _dt.datetime.now(_dt.timezone.utc)
         return cls(
             drawer_id=cls.make_id(scope, body, ts),
@@ -125,33 +168,44 @@ class TypedDrawer:
             scope=scope.strip(),
             confidence=conf_enum,
             body=body.strip(),
+            tier=tier_enum,
             supersedes=supersedes.strip() if supersedes else None,
             created_at=ts,
             pinned=pinned,
         )
 
     # ------------------------------------------------------------------
-    # Salience
+    # Salience — exponential decay per tier half-life
     # ------------------------------------------------------------------
 
     def salience(self, now: Optional[_dt.datetime] = None) -> float:
         """Salience score used for retrieval reranking and prune decisions.
 
         Formula:
+            decay = exp(-ln(2) * age_days / half_life)   # exponential decay
+                  = 1.0                                   # permanent tier
+
             salience = (usage_count * 2)
-                     + recency_decay
+                     + decay
                      + (pinned * 5)
                      - (cite_then_correct * 1.5)
                      - (stale * 2)
 
-        recency_decay = max(0, 1 - days_since_created / 90)
+        Permanent drawers never decay — decay factor stays 1.0 forever.
+        Ephemeral drawers (half_life=0.5d) reach ~0.25 in one day.
         """
         now = now or _dt.datetime.now(_dt.timezone.utc)
         age_days = max(0.0, (now - self.created_at).total_seconds() / 86400.0)
-        recency_decay = max(0.0, 1.0 - age_days / 90.0)
+
+        half_life = self.tier.half_life_days
+        if half_life is None:
+            decay = 1.0  # permanent — never decays
+        else:
+            decay = math.exp(-math.log(2) * age_days / half_life)
+
         score = (
             self.usage_count * 2.0
-            + recency_decay
+            + decay
             + (5.0 if self.pinned else 0.0)
             - self.cite_then_correct * 1.5
             - (2.0 if self.stale else 0.0)
@@ -163,11 +217,7 @@ class TypedDrawer:
     # ------------------------------------------------------------------
 
     def summary(self, max_chars: int = 180) -> str:
-        """One-line summary suitable for SessionStart context injection.
-
-        Includes drawer_id (so Claude can expand on demand), type, confidence,
-        and a truncated body. Never inject the full body via this path.
-        """
+        """One-line summary suitable for SessionStart context injection."""
         first_line = self.body.splitlines()[0].strip()
         truncated = first_line if len(first_line) <= max_chars else first_line[: max_chars - 1] + "…"
         flags = []
@@ -175,6 +225,8 @@ class TypedDrawer:
             flags.append("STALE")
         if self.confidence == Confidence.LOW:
             flags.append("low_conf")
+        if self.tier != MemoryTier.LONG_TERM:
+            flags.append(f"tier:{self.tier.value}")
         if self.supersedes:
             flags.append(f"supersedes:{self.supersedes}")
         flag_str = f" [{','.join(flags)}]" if flags else ""
@@ -208,6 +260,7 @@ def serialize_drawer(d: TypedDrawer) -> str:
         ("type", d.type.value),
         ("scope", d.scope),
         ("confidence", d.confidence.value),
+        ("tier", d.tier.value),
         ("supersedes", d.supersedes),
         ("created_at", d.created_at),
         ("usage_count", d.usage_count),
@@ -247,6 +300,7 @@ def parse_drawer(text: str) -> TypedDrawer:
     """Parse mempalace-stored content back into a TypedDrawer.
 
     Raises ValueError if frontmatter is missing or malformed.
+    Old drawers without a `tier` field default to LONG_TERM for backward compatibility.
     """
     m = _FRONTMATTER_RE.match(text)
     if not m:
@@ -275,12 +329,19 @@ def parse_drawer(text: str) -> TypedDrawer:
     elif not isinstance(created_at, _dt.datetime):
         created_at = _dt.datetime.now(_dt.timezone.utc)
 
+    raw_tier = fields.get("tier")
+    try:
+        tier = MemoryTier.parse(str(raw_tier)) if raw_tier else MemoryTier.LONG_TERM
+    except ValueError:
+        tier = MemoryTier.LONG_TERM  # unknown tier → safe default
+
     return TypedDrawer(
         drawer_id=str(fields["drawer_id"]),
         type=DrawerType.parse(str(fields["type"])),
         scope=str(fields["scope"]),
         confidence=Confidence.parse(str(fields["confidence"])),
         body=body,
+        tier=tier,
         supersedes=fields.get("supersedes") or None,
         created_at=created_at,
         usage_count=int(fields.get("usage_count") or 0),
@@ -288,5 +349,3 @@ def parse_drawer(text: str) -> TypedDrawer:
         stale=bool(fields.get("stale") or False),
         pinned=bool(fields.get("pinned") or False),
     )
-
-
