@@ -26,13 +26,13 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full flow diagram and token math.
 
 ---
 
-## Global setup (one-time)
+## Global setup (one-time per machine)
 
 ### Step 1 — Clone this repo
 
 ```bash
 git clone https://github.com/your-org/synaptic-memory.git
-# remember where you cloned it — you'll need the path in Step 4
+# remember where you cloned it — you'll need the path in later steps
 ```
 
 ### Step 2 — Install mempalace (Python 3.11)
@@ -56,7 +56,8 @@ Configure storage in `~/.mempalace/config.json`:
 ```bash
 git clone https://github.com/safishamsi/graphify.git
 python3.14 -m pip install -e graphify/
-# Windows: py -3.14 -m pip install -e graphify/
+python3.14 -m pip install mcp
+# Windows: py -3.14 -m pip install -e graphify/ && py -3.14 -m pip install mcp
 ```
 
 ### Step 4 — Install Obsidian (optional, for visualization)
@@ -150,13 +151,17 @@ Then edit `.mcp.json`:
       "type": "stdio",
       "command": "python3.14",
       "args": ["-m", "graphify.serve", "graphify-out/graph.json"],
-      "env": {}
+      "env": {
+        "SYNAPTIC_SCAN_ROOT": "/path/to/your/projects"
+      }
     }
   }
 }
 ```
 
-> **Windows:** Use `py -3.11` / `py -3.14` and full Python executable paths if `py` launcher doesn't resolve correctly.
+> **Windows:** Use `py -3.11` / `py -3.14` and full Python executable paths if the `py` launcher doesn't resolve correctly.
+
+`SYNAPTIC_SCAN_ROOT` tells the nightly consolidation cron which root directory to scan for projects. Set it to the parent folder that contains all your projects (e.g. `E:\Allan Project` or `/home/user/projects`). If not set, graphify sync is skipped.
 
 Claude now has these tools in every session:
 
@@ -169,11 +174,67 @@ Claude now has these tools in every session:
 | `query_graph` | Traverse the codebase knowledge graph |
 | `god_nodes` | Find the most connected code concepts |
 
+### Step 7 — Schedule nightly consolidation
+
+One global cron entry — runs at 1am, reads `SYNAPTIC_SCAN_ROOT` from `.mcp.json`, discovers every project with a built graphify graph, and syncs each one.
+
+**Linux / macOS** — add to crontab (`crontab -e`):
+
+```bash
+0 1 * * * cd <synaptic-memory-path> && python3.11 -m typed.consolidate \
+    --synaptic-repo <synaptic-memory-path>
+```
+
+**Windows** — run once in PowerShell (registers a persistent Task Scheduler entry):
+
+```powershell
+$action = New-ScheduledTaskAction `
+    -Execute "py.exe" `
+    -Argument '-3.11 -m typed.consolidate --synaptic-repo "<synaptic-memory-path>"' `
+    -WorkingDirectory "<synaptic-memory-path>"
+$trigger = New-ScheduledTaskTrigger -Daily -At 1:00AM
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+Register-ScheduledTask -TaskName "synaptic-memory-consolidate" `
+    -Action $action -Trigger $trigger -Settings $settings -Force
+```
+
+`StartWhenAvailable` ensures the task runs on next boot if the machine was asleep at 1am.
+
+**Managing the task (PowerShell or via Claude):**
+
+| Action | Command |
+| --- | --- |
+| Disable (pause) | `Disable-ScheduledTask -TaskName "synaptic-memory-consolidate"` |
+| Enable | `Enable-ScheduledTask -TaskName "synaptic-memory-consolidate"` |
+| Remove permanently | `Unregister-ScheduledTask -TaskName "synaptic-memory-consolidate" -Confirm:$false` |
+| Re-create | Re-run the `Register-ScheduledTask` block above |
+
+The task window appears briefly at 1am and closes on its own — do not close it while it is running.
+
+**Logs (both platforms):**
+
+| File | Contents |
+| --- | --- |
+| `~/.synaptic-memory/consolidate-report.json` | Full run report — drawers scanned, auto-pinned, contradictions, projects discovered/synced/failed |
+| `~/.synaptic-memory/sync-errors.log` | Only created if errors occurred. On Windows, Notepad opens it automatically after a failed run. |
+
+On Windows `~` resolves to `C:\Users\<your-username>`.
+
+What consolidation does per run:
+
+1. Walks all typed drawers — salience reranks and auto-pins top 5%
+2. Detects contradictions (high-similarity opposing drawer pairs)
+3. Flags stale drawers (references files modified since last run)
+4. Archives zero-hit drawers older than 90 days
+5. Discovers all projects under `SYNAPTIC_SCAN_ROOT` with a built graphify graph
+6. Runs `mempal_to_graphify.py` + `graphify_wiki.py --clean` for each project
+7. Writes `consolidate-report.json`; opens Notepad error log on Windows if anything failed
+
 ---
 
 ## Per-project setup
 
-Only these things change per project — global hooks and MCP servers never need to change.
+Only these things change per project — global hooks, MCP servers, and the consolidation cron never need to change.
 
 ### 1. Config files (project root)
 
@@ -214,45 +275,56 @@ python3.14 -m graphify .   # or: /graphify in Claude Code
 
 This generates `graphify-out/graph.json`. Once built, the graphify MCP server starts serving it and the PreToolUse hook activates automatically.
 
-### 3. Scope tag (optional but recommended)
+### 3. Exclude files from the graph (`.graphifyignore`)
 
-Set `SYNAPTIC_V2_SCOPE=MY-PROJECT` in the project's environment so hooks tag drawers to the correct project scope. Without this, scope falls back to the current folder name.
+Place a `.graphifyignore` file in your project root to tell graphify which files and folders to skip. Uses fnmatch glob syntax (same as `.gitignore`). Graphify also walks up to parent directories (stopping at `.git`) so a single file at a monorepo root covers all sub-projects.
 
-### 4. Nightly consolidation cron
+Graphify already skips common noise by default (`node_modules`, `__pycache__`, `.git`, `dist`, `build`, `graphify-out`, etc.). Only add patterns for things not in that built-in list.
 
-One global cron entry — reads `SYNAPTIC_SCAN_ROOT` from `.mcp.json`'s graphify env block, discovers every project under that root with a built graphify graph, syncs each one, and opens a Notepad error log on Windows if anything fails. If `SYNAPTIC_SCAN_ROOT` is not set in `.mcp.json`, graphify sync is skipped entirely.
+```gitignore
+# .graphifyignore
 
-Set the scan root once in `.mcp.json`:
+# Python artefacts
+*.pyc
+*.pyo
+__pycache__/
+*.egg-info/
 
-```json
-"graphify": {
-  "env": {
-    "SYNAPTIC_SCAN_ROOT": "/path/to/your/projects"
-  }
-}
+# Virtual environments (if not named venv/.venv)
+env/
+.env/
+
+# Test fixtures and coverage output
+tests/fixtures/
+htmlcov/
+
+# Lock files (no useful graph signal)
+*.lock
+poetry.lock
+requirements*.txt
+
+# Secrets — never graph these
+.env
+*.pem
+*.key
+secrets/
+
+# IDE noise
+.idea/
+.vscode/
 ```
 
-**Linux / macOS** — add to crontab (`crontab -e`):
+Run `/graphify --update` after editing it to apply changes to an existing graph.
 
-```bash
-0 1 * * * cd <synaptic-memory-path> && python3.11 -m typed.consolidate \
-    --synaptic-repo <synaptic-memory-path>
-```
+### 4. Scope tag (only needed without `mempalace.project.json`)
 
-**Windows** — run once in PowerShell (registers a persistent Task Scheduler entry):
+Hooks resolve scope in this order:
 
-```powershell
-$action = New-ScheduledTaskAction `
-    -Execute "py.exe" `
-    -Argument '-3.11 -m typed.consolidate --synaptic-repo "<synaptic-memory-path>"' `
-    -WorkingDirectory "<synaptic-memory-path>"
-$trigger = New-ScheduledTaskTrigger -Daily -At 1:00AM
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
-Register-ScheduledTask -TaskName "synaptic-memory-consolidate" `
-    -Action $action -Trigger $trigger -Settings $settings -Force
-```
+1. `SYNAPTIC_V2_SCOPE` env var — explicit override
+2. `CLAUDE_PROJECT_SLUG` env var — set automatically by mempalace from `mempalace.project.json`
+3. `Path.cwd().name` — last-resort fallback (current folder name)
 
-`StartWhenAvailable` ensures the task runs on next boot if the machine was asleep at 1am.
+If you have `mempalace.project.json` with a `project_slug` field (Step 1 above), scope is already correct — you do not need to set `SYNAPTIC_V2_SCOPE`. Only set it if you are skipping `mempalace.project.json` or need to override the slug.
 
 ---
 
@@ -307,13 +379,13 @@ mark_correction(["drw_xxx"])  # auto-demotes to confidence=low after 2 hits
 
 **Token budget tracking:**
 
-Drawer counts are recorded automatically each time the Stop hook fires (via `stop_15msg.py` → `record_session()`). View the weekly report at any time:
+Drawer counts are recorded automatically each time the Stop hook fires. View the weekly report at any time:
 
 ```bash
 python3.11 -m typed.budget          # show baseline + weekly targets
 ```
 
-To also record token counts (not available from hooks automatically):
+To also record token counts manually:
 
 ```bash
 python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "session"
@@ -331,6 +403,7 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 | `.mcp.json.example` | Yes | MCP server config template |
 | `mempalace.project.json.example` | Yes | Per-project config template |
 | `mempalace.yaml.example` | Yes | Room definitions template |
+| `.graphifyignore` | Yes | Files/folders excluded from graphify scanning |
 | `.mcp.json` | No (gitignored) | Your local MCP config with real paths |
 | `mempalace.project.json` | No (gitignored) | Your local per-project config |
 | `mempalace.yaml` | No (gitignored) | Your local room definitions |
@@ -340,7 +413,7 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 | `scripts/mempal_to_graphify.py` | Yes | Bridge: mine ChromaDB → inject into graphify |
 | `scripts/graphify_wiki.py` | Yes | Obsidian wiki generator |
 | `typed/` | Yes | Typed memory package (types, write, read, consolidate, telemetry, budget) |
-| `tests/` | Yes | 21 unit tests |
+| `tests/` | Yes | Unit tests |
 | `graphify-out/` | No (gitignored) | Auto-generated graph + Obsidian vault |
 
 ---
@@ -361,3 +434,43 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 | 0 memory nodes in graphify | Complete a session so hooks fire, then run `mempal_to_graphify.py` |
 | Obsidian shows no graph | Open `<project>/graphify-out/` not the synaptic-memory repo root |
 | Palace HNSW diverged | Run `python3.11 -m mempalace repair --yes` |
+| Consolidation task missing | Re-run the `Register-ScheduledTask` PowerShell block in Step 7 |
+| `consolidate-report.json` empty | Task ran but mempalace has no typed drawers yet — complete sessions first |
+
+---
+
+## Roadmap
+
+### Current status — testing phase (started May 2026)
+
+The full stack is implemented and running:
+
+- mempalace (ChromaDB) + typed layer — storing and retrieving memory across sessions
+- graphify — building code knowledge graphs with community detection
+- Claude Code hooks — SessionStart, Stop, PreCompact, PreToolUse, PostToolUse all wired
+- Nightly consolidation cron — auto-pinning, contradiction detection, stale flagging, multi-project sync
+- `.graphifyignore` — per-project file exclusion
+- Obsidian wiki — human-readable graph visualization
+
+**The next 90 days are a testing and hardening period.** Real-world usage across multiple projects will surface edge cases, performance issues, and UX friction before a public release.
+
+### Planned — installer (after 90-day testing window)
+
+After the testing period, synaptic-memory will be packaged as a proper installer — the goal is a single command that sets up the full stack:
+
+```bash
+# Target UX (not yet implemented)
+pip install synaptic-memory
+synaptic-memory install
+```
+
+The installer will handle:
+
+- Dependency resolution (mempalace, graphify, correct Python versions)
+- `~/.claude/settings.json` hook registration
+- `.mcp.json` scaffolding per project
+- `~/.mempalace/config.json` palace path setup
+- Nightly consolidation cron registration (platform-aware: crontab on Linux/macOS, Task Scheduler on Windows)
+- Upgrade path for existing setups
+
+Until then, follow the manual setup steps in [INSTALL.ai.md](INSTALL.ai.md).

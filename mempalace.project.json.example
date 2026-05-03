@@ -1,5 +1,5 @@
 {
-  "project_slug": "MY-PROJECT",
-  "wing":         "MyProject",
+  "project_slug": "my-project",
+  "wing":         "my-project",
   "memory_archive": "/your/chosen/memory/storage"
 }

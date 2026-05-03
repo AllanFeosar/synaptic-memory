@@ -1,0 +1,50 @@
+# .graphifyignore — tell graphify which files/folders to skip when building the knowledge graph.
+# Syntax: one pattern per line, gitignore-style fnmatch globs. Lines starting with # are comments.
+# Patterns match against: filenames, path segments, and full relative paths.
+# This file is also read from parent directories up to the nearest .git root.
+
+# --- Python artefacts ---
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+.eggs/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+.env/
+
+# --- Build and dist outputs ---
+dist/
+build/
+*.whl
+*.tar.gz
+
+# --- Test fixtures and coverage ---
+tests/fixtures/
+.coverage
+htmlcov/
+.pytest_cache/
+
+# --- Lock files (too noisy, no useful graph signal) ---
+*.lock
+poetry.lock
+requirements*.txt
+
+# --- Graphify own output (avoid self-referential graphs) ---
+graphify-out/
+
+# --- Secrets and local config (never graph these) ---
+.env
+*.pem
+*.key
+secrets/
+
+# --- IDE and OS noise ---
+.idea/
+.vscode/
+*.DS_Store
+Thumbs.db

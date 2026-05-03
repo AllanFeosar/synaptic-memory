@@ -1,4 +1,4 @@
-wing: MyProject
+wing: my-project
 rooms:
 - name: decisions
   description: Architecture and design decisions made during development
