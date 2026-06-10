@@ -492,6 +492,109 @@ Four explicit tiers in `MemoryTier` (typed/types.py), driving both `salience()` 
 
 Pinned drawers are always exempt from archiving regardless of tier.
 
+### Done — retrieval audit + search-call budget (2026-06-10)
+
+`spreading_activation_search()` now logs every call to `~/.synaptic-memory/retrieval-audit.jsonl` (ts, query, scope, top_k, results with drawer_id/score/type/snippet, duration_ms). Run `py -m typed.budget --retrieval-report` for a summary.
+
+The 2-week audit (882 retrievals, 2026-05-24 → 2026-06-10) found the council's "wrong top-3" prerequisite was satisfiable (290/882 = 33% had top-1 score < 0.3, mostly graphify-hop noise on EMR.REPORTS code-symbol queries) — but the dominant failure was **latency, not relevance**: avg 24.5s per call, max 469s (7.8 min) on EMR.REPORTS. Root cause: hop expansion x graphify fan-out could trigger 100+ ChromaDB `client.search()` calls per invocation.
+
+Fix applied in `typed/read.py`:
+
+- `MAX_SEARCH_CALLS = 12` — hard cap on `client.search()` calls per invocation
+- `_FRONTIER_FANOUT = 3` — only ripple outward from the 3 strongest activations per hop (was: all of them)
+- Graphify fan-out reduced from 3 refs x 3 labels to `_GRAPHIFY_REFS_PER_HOP = 2` x `_GRAPHIFY_LABELS_PER_REF = 2`
+
+All 56 existing tests pass unchanged. Re-check `--retrieval-report` after another week of usage to confirm avg duration has dropped from the 24.5s baseline.
+
+### Planned — ADHD behavior layer (`typed/adhd.py`)
+
+A non-linear retrieval layer that adds human-like associative behavior on top of `spreading_activation_search()`. Modeled on three ADHD cognitive patterns that outperform focused search for serendipitous discovery.
+
+**Why:** Linear retrieval (query → top-k) misses bridging memories, cross-domain patterns, and high-value low-usage drawers. The ADHD layer surfaces what focused search buries — without replacing it.
+
+**Status:** Retrieval is now instrumented (see "Done — retrieval audit" above) and the latency blocker has been fixed. Before building this layer, confirm with another `--retrieval-report` run that latency is under control, then re-evaluate whether the 33% low-relevance rate on code-symbol queries still justifies `QueryDriftLayer` / `InterruptLayer`.
+
+#### The three modules
+
+**1. InterruptLayer (Impulsivity) — build first, highest ROI**
+
+Interrupt-driven early-exit retrieval. Surfaces a strong hit immediately without waiting for full hop expansion.
+
+- Mode: `LOW` by default — fire on score >= 0.88 only
+- Three interrupt types: `threshold` (score clears cutoff), `margin` (top-1 dominates top-2 by > 0.18), `saturation` (hop frontier has gone cold)
+- **Do NOT use phasic gain score multiplier** — inflating scores before threshold check breaks the contract for all downstream callers
+- `ImpulsivityMode` enum: `OFF / LOW / MEDIUM / HIGH` — hooks use `HIGH` (30ms budget), session start uses `LOW`
+
+**2. QueryDriftLayer (Inattention) — build second**
+
+Stochastic query mutation. With probability `p=0.05` (NOT 0.25 — too destructive), mutates the query before passing to core search via one of three strategies:
+
+- **Temporal hop:** use most-recently-written drawer body as the query seed (PAM temporal co-occurrence)
+- **Lexical tangent:** append a noun phrase extracted from a random high-salience drawer
+- **Scope escape:** lift the wing filter and search globally instead of project-local
+
+Uses Boltzmann sampling (`temperature=1.5`) instead of argmax top-k for neighbor selection. Tangent jumps originate from the **weakest** frontier member (not strongest), using the last 250 chars of its body as seed — trailing text is where tangential asides live.
+
+Gate: drifted results must have `salience() > 1.5` to be admitted. Stale drawers excluded from tangent candidates.
+
+**3. ParallelSearchLayer (Hyperactivity) — build last, never in default config**
+
+Parallel burst searches across multiple query variants and cross-domain wings simultaneously. Uses `ThreadPoolExecutor` (ChromaDB is sync) with `asyncio.run_in_executor`.
+
+- `burst_n=3` parallel variant queries (not 8 — token budget)
+- `max_extra_drawers=2` cap — ADHD results compete with base results, never append on top
+- `PreActivationCache` with **LRU eviction, max 100 entries** — required before shipping; without eviction this is a memory leak
+- Background DMN loop (`asyncio.Task`): OFF until session persistence across invocations is verified — if Claude Code doesn't maintain a live Python process between turns, the loop never fires and is a no-op
+
+#### Architecture
+
+```
+inject_session_start()
+    └─► adhd_search(query, scope, config)          ← typed/adhd.py
+            ① QueryDriftLayer.drift()              maybe mutate query/scope
+            ② InterruptLayer.pre_check(seeds)      register strong hits before full search
+            ③ spreading_activation_search()        existing core — UNCHANGED
+            ④ ParallelSearchLayer.burst()          append up to 2 novel extras
+            ⑤ InterruptLayer.post_merge()          prepend pre-registered hits, dedup
+            ⑥ cap at SESSION_START_TOP_K=3
+```
+
+Single integration point: one line change in `inject_session_start()` in `typed/read.py`. Everything else untouched.
+
+#### Default config
+
+```python
+ADHDConfig(
+    enabled=False,           # OFF until retrieval failure is observed
+    level=0,                 # 0=off, 1=impulse only, 2=+drift, 3=+burst
+    p_inattention=0.05,      # NOT 0.25 — start conservative
+    impulse_threshold=0.88,
+    impulse_mode="prepend",  # "prepend" safe; "fast_path" for hooks only
+    burst_n=3,
+    max_extra_drawers=2,
+    burst_timeout_ms=200,
+)
+```
+
+Env var override: `SYNAPTIC_ADHD_LEVEL=1` enables impulse-only mode. `SYNAPTIC_ADHD_DISABLE=1` bypasses the layer entirely.
+
+#### What NOT to build (scope boundary)
+
+- **No serendipity feed / daily digest** — product roadmap item, not retrieval engineering
+- **No phasic gain score multiplier** — correctness bug, not a tunable
+- **No always-on DMN loop** — verify session persistence first
+- **No fan-out width of 8** — 3 parallel queries is enough; 8 bloats the context window before the user issues a real query
+
+#### Source research
+
+- Foraging theory (Chevalier 2019): ADHD individuals retrieve more unique items via earlier patch departure + longer semantic jumps — `beta=0.004, p<0.02`
+- PAM (arxiv 2602.11322): temporal co-occurrence achieves cross-boundary Recall@20=0.421 where cosine similarity scores zero
+- RAG-R1 (arxiv 2507.02962): multi-query parallelism +13.2% recall, −11.1% latency vs sequential
+- Stop-RAG (arxiv 2510.14337): value-based retrieval early stopping
+- HNSW saturation early exit (Springer 2025): stop when frontier improvement < floor
+
+---
+
 ### Planned — installer (after 90-day testing window)
 
 After the testing period, synaptic-memory will be packaged as a proper installer — the goal is a single command that sets up the full stack:

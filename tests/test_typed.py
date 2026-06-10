@@ -14,6 +14,7 @@ import datetime as _dt
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 # Make typed importable from sibling dir
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -36,6 +37,20 @@ from typed.write import (
     write_recipe,
     write_session_summary,
 )
+
+
+# spreading_activation_search() logs to ~/.synaptic-memory/retrieval-audit.jsonl.
+# Patch it out for the whole test run so test invocations (MockClient, 0ms)
+# don't pollute the real audit log used for retrieval-quality analysis.
+_record_retrieval_patcher = mock.patch("typed.budget.record_retrieval")
+
+
+def setUpModule():
+    _record_retrieval_patcher.start()
+
+
+def tearDownModule():
+    _record_retrieval_patcher.stop()
 
 
 # ---------------------------------------------------------------------------

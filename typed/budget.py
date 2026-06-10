@@ -34,6 +34,7 @@ from typing import Optional
 
 
 DEFAULT_LOG = Path.home() / ".synaptic-memory" / "budget.jsonl"
+DEFAULT_RETRIEVAL_LOG = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
 
 # Targets from the design spec
 WEEK_4_TARGET_DROP = 0.20  # 20% reduction vs baseline
@@ -54,6 +55,17 @@ class SessionRecord:
 
     def total(self) -> int:
         return self.tokens_in + self.tokens_out
+
+
+@dataclass
+class RetrievalRecord:
+    ts: str
+    query: str
+    scope: Optional[str]
+    top_k: int
+    result_count: int
+    duration_ms: float
+    results: list  # [{drawer_id, score, type, snippet}]
 
 
 @dataclass
@@ -116,6 +128,76 @@ def _load_records(log_path: Path) -> list[SessionRecord]:
         except (ValueError, TypeError):
             continue
     return out
+
+
+# ---------------------------------------------------------------------------
+# Retrieval audit
+# ---------------------------------------------------------------------------
+
+def record_retrieval(
+    *,
+    query: str,
+    scope: Optional[str] = None,
+    top_k: int,
+    results: list,
+    duration_ms: float,
+    log_path: Path = DEFAULT_RETRIEVAL_LOG,
+) -> None:
+    """Append one retrieval event to retrieval-audit.jsonl. Never raises."""
+    rec = RetrievalRecord(
+        ts=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+        query=query,
+        scope=scope,
+        top_k=top_k,
+        result_count=len(results),
+        duration_ms=round(duration_ms, 1),
+        results=results,
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(asdict(rec)) + "\n")
+
+
+def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
+    """Summarise retrieval-audit.jsonl to surface quality signals."""
+    if not log_path.exists():
+        return "No retrieval records yet. Run sessions to populate retrieval-audit.jsonl."
+
+    records: list[dict] = []
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            try:
+                records.append(json.loads(line))
+            except (ValueError, TypeError):
+                continue
+
+    if not records:
+        return "No retrieval records yet."
+
+    total = len(records)
+    avg_dur = mean(r["duration_ms"] for r in records)
+    avg_results = mean(r["result_count"] for r in records)
+    zero_result = sum(1 for r in records if r["result_count"] == 0)
+    under_half = sum(1 for r in records if 0 < r["result_count"] < r["top_k"] / 2)
+
+    lines = [
+        "retrieval audit report",
+        "=" * 28,
+        f"Total retrievals logged : {total}",
+        f"Avg duration            : {avg_dur:.1f} ms",
+        f"Avg results returned    : {avg_results:.1f}",
+        f"Zero-result queries     : {zero_result} ({zero_result / total * 100:.1f}%)",
+        f"Under-half-k queries    : {under_half} ({under_half / total * 100:.1f}%)",
+        "",
+        "Last 5 queries:",
+    ]
+    for r in records[-5:]:
+        lines.append(
+            f"  [{r['ts'][:16]}] scope={r['scope'] or 'global'!r:12s} "
+            f"→ {r['result_count']}/{r['top_k']} in {r['duration_ms']:.0f}ms"
+            f"  q={r['query'][:50]!r}"
+        )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +292,14 @@ def main() -> int:
     p.add_argument("--file-summary-hits", type=int, default=0)
     p.add_argument("--file-summary-misses", type=int, default=0)
     p.add_argument("--note", default="")
+    p.add_argument("--retrieval-report", action="store_true",
+                   help="Print retrieval-audit.jsonl summary")
+    p.add_argument("--retrieval-log", type=Path, default=DEFAULT_RETRIEVAL_LOG)
     args = p.parse_args()
+
+    if args.retrieval_report:
+        sys.stdout.write(retrieval_report(args.retrieval_log) + "\n")
+        return 0
 
     if args.record:
         rec = record_session(

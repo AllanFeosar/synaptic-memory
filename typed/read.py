@@ -28,6 +28,7 @@ Three entry points:
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -46,6 +47,20 @@ SUMMARY_MAX_CHARS = 180
 # Extra discount applied to graphify-sourced hops vs pure semantic hops.
 # Structural neighbors are less certain than direct embedding similarity.
 _GRAPHIFY_HOP_DISCOUNT = 0.6
+
+# Hard cap on mempalace client.search() calls per spreading_activation_search()
+# invocation. Hop expansion x graphify fan-out without this cap can trigger
+# 100+ ChromaDB calls and multi-minute retrievals (observed up to 469s for
+# EMR.REPORTS in retrieval-audit.jsonl).
+MAX_SEARCH_CALLS = 12
+
+# Only ripple outward from the N strongest frontier members per hop — caps
+# fan-out so the search budget is spent on the most promising candidates.
+_FRONTIER_FANOUT = 3
+
+# Graphify hop fan-out per seed drawer: code refs extracted x labels per ref.
+_GRAPHIFY_REFS_PER_HOP = 2
+_GRAPHIFY_LABELS_PER_REF = 2
 
 # Regex for file references in drawer bodies, e.g. `auth.py`, `jwt.ts`
 _FILE_REF_RE = re.compile(r"`([^`]+\.(?:py|ts|tsx|js|jsx|go|rs|java|cs|md))`")
@@ -148,14 +163,24 @@ def spreading_activation_search(
         graphify_client: Optional graphify backend. When None, graphify hops
                          are skipped and behavior is identical to before.
     """
+    _t0 = time.perf_counter()
     client = client or InProcessClient()
     wing = scope.lower() if scope else None
+
+    # Budget mempalace search() calls — see MAX_SEARCH_CALLS.
+    search_calls = [0]
+
+    def _search(q: str, k: int):
+        if search_calls[0] >= MAX_SEARCH_CALLS:
+            return []
+        search_calls[0] += 1
+        return client.search(query=q, top_k=k, wing=wing)
 
     # activation map: drawer_id -> (drawer, activation_score)
     activation: dict[str, tuple[TypedDrawer, float]] = {}
 
     # Seed: initial semantic search
-    seeds = client.search(query=query, top_k=top_k * 2, wing=wing)
+    seeds = _search(query, top_k * 2)
     frontier: list[tuple[TypedDrawer, float]] = []
     for hit in seeds:
         d = _hit_to_drawer(hit)
@@ -171,10 +196,14 @@ def spreading_activation_search(
         decay = hop_decay ** hop
         next_frontier: list[tuple[TypedDrawer, float]] = []
 
-        for seed_drawer, seed_score in frontier:
+        # Only expand the strongest activations — caps fan-out instead of
+        # rippling from every drawer activated so far.
+        ripple_from = sorted(frontier, key=lambda kv: -kv[1])[:_FRONTIER_FANOUT]
+
+        for seed_drawer, seed_score in ripple_from:
             # --- Phase 1: mempalace semantic hop ---
             neighbor_query = seed_drawer.body[:300]
-            neighbors = client.search(query=neighbor_query, top_k=3, wing=wing)
+            neighbors = _search(neighbor_query, 3)
             for hit in neighbors:
                 d = _hit_to_drawer(hit)
                 if d is None or d.drawer_id in activation:
@@ -186,11 +215,11 @@ def spreading_activation_search(
             # --- Phase 2: graphify structural hop (optional) ---
             if graphify_client is not None:
                 code_refs = _extract_code_refs(seed_drawer.body)
-                for ref in code_refs[:3]:  # cap to avoid search explosion
-                    g_labels = graphify_client.query(ref, limit=3)
+                for ref in code_refs[:_GRAPHIFY_REFS_PER_HOP]:
+                    g_labels = graphify_client.query(ref, limit=_GRAPHIFY_LABELS_PER_REF)
                     for label in g_labels:
                         # Search mempalace for memories mentioning this code node
-                        g_hits = client.search(query=label, top_k=2, wing=wing)
+                        g_hits = _search(label, 2)
                         for hit in g_hits:
                             d = _hit_to_drawer(hit)
                             if d is None or d.drawer_id in activation:
@@ -201,7 +230,7 @@ def spreading_activation_search(
                             next_frontier.append((d, score))
 
         frontier = next_frontier
-        if not frontier:
+        if not frontier or search_calls[0] >= MAX_SEARCH_CALLS:
             break
 
     # Rank by activation * salience — rewards both relatedness and importance
@@ -209,7 +238,29 @@ def spreading_activation_search(
         activation.values(),
         key=lambda kv: -(kv[1] + kv[0].salience() * 0.3),
     )
-    return [d for d, _ in ranked[:top_k]]
+    top = ranked[:top_k]
+
+    try:
+        from typed.budget import record_retrieval as _rr
+        _rr(
+            query=query,
+            scope=scope,
+            top_k=top_k,
+            results=[
+                {
+                    "drawer_id": d.drawer_id,
+                    "score": round(s, 4),
+                    "type": d.type.value,
+                    "snippet": d.body[:80],
+                }
+                for d, s in top
+            ],
+            duration_ms=(time.perf_counter() - _t0) * 1000,
+        )
+    except Exception:
+        pass
+
+    return [d for d, _ in top]
 
 
 def inject_session_start(
