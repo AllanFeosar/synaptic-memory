@@ -83,7 +83,7 @@ The hooks chain mempalace first, then the typed layer with `--no-mempalace-passt
       {
         "matcher": "Write",
         "hooks": [
-          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace('\\\\','/'); b='.claude/memory' in p; b and (print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'BLOCKED: use mcp__mempalace__mempalace_add_drawer, not .claude/memory/'}})) or sys.exit(2))\""}
+          {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/pre_tool_write.py\""}
         ]
       },
       {
@@ -418,6 +418,7 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 | `hooks/session_start.py` | Yes | SessionStart hook — spreading activation + graphify |
 | `hooks/stop_15msg.py` | Yes | Stop hook (every 15 messages) — write-only |
 | `hooks/pre_compact.py` | Yes | PreCompact hook — spreading activation + graphify before compaction |
+| `hooks/pre_tool_write.py` | Yes | PreToolUse/Write hook — blocks writes to `.claude/memory/`, redirects to mempalace |
 | `hooks/pre_tool_read.py` | Yes | PreToolUse/Read hook — file-targeted memory injection |
 | `hooks/post_tool_edit.py` | Yes | PostToolUse/Edit hook — graphify neighbor surfacing after edits |
 | `scripts/mempal_to_graphify.py` | Yes | Bridge: mine ChromaDB → inject into graphify |
@@ -437,6 +438,7 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 | `No module named 'chromadb'` | `python3.11 -m pip install -e <mempalace-clone>/` |
 | `No module named 'graphify'` | `python3.14 -m pip install -e <graphify-clone>/` |
 | `No module named 'mcp'` | `python3.14 -m pip install mcp` |
+| Hook error: `File "<string>", line 1` | Inline `-c` hook has shell quoting issue on Windows — replace with a `.py` file (all hooks in this repo now use `.py` files) |
 | Hook not firing | Verify `python3.11 -m mempalace --help` resolves |
 | MCP tools missing | Check `.mcp.json` exists in project root with correct paths |
 | `mempalace.yaml` not found | Copy `mempalace.yaml.example` → `mempalace.yaml` in project root |

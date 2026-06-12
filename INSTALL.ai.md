@@ -125,7 +125,13 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
       {
         "matcher": "Write",
         "hooks": [
-          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace('\\\\','/'); b='.claude/memory' in p; b and (print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','additionalContext':'BLOCKED: use mcp__mempalace__mempalace_add_drawer, not .claude/memory/'}})) or sys.exit(2))\""}
+          {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/pre_tool_write.py\""}
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/pre_tool_read.py\""}
         ]
       }
     ],
@@ -133,7 +139,8 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
       {
         "matcher": "Edit|Write",
         "hooks": [
-          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path',''); remind=p and any(p.endswith(x) for x in ('.py','.ts','.tsx','.js','.cs','.sql','.json','.yaml','.yml')); remind and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'Code edited — if this completes a bug fix, feature, or decision, call mcp__mempalace__mempalace_add_drawer now.'}}))\""}
+          {"type": "command", "command": "python3.11 -c \"import sys,json; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path',''); remind=p and any(p.endswith(x) for x in ('.py','.ts','.tsx','.js','.cs','.sql','.json','.yaml','.yml')); remind and print(json.dumps({'hookSpecificOutput':{'hookEventName':'PostToolUse','additionalContext':'Code edited — if this completes a bug fix, feature, or decision, call mcp__mempalace__mempalace_add_drawer now.'}}))\""},
+          {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/post_tool_edit.py\""}
         ]
       }
     ],
@@ -164,8 +171,9 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
 Hook behavior:
 
 - **PreToolUse / Glob|Grep** — before any file search, reminds Claude to check `graphify-out/GRAPH_REPORT.md` first (only fires if graph exists)
-- **PreToolUse / Write** — blocks writes to `.claude/memory/` or `MEMORY.md`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
-- **PostToolUse / Edit|Write** — after editing any code file, reminds Claude to save decisions to mempalace
+- **PreToolUse / Write** — blocks writes to `.claude/memory/`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
+- **PreToolUse / Read** — before reading a file, queries graphify for that file's node + neighbors, searches mempalace for related memories, injects them as context. Silent if no graph or no memories found.
+- **PostToolUse / Edit|Write** — after editing any code file: (1) reminds Claude to save decisions to mempalace, (2) surfaces graphify structural neighbors that may also need updating
 - **SessionStart** — mempalace loads prior context; typed layer injects top-3 typed summaries (~150 tokens)
 - **Stop** — fires every ~15 messages; typed layer writes one summary drawer and records drawer count to `typed/budget.py`
 - **PreCompact** — read-only; surfaces pinned drawers into context before compaction
