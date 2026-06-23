@@ -262,6 +262,20 @@ Check the palace is reachable:
 python3.11 -m mempalace status
 ```
 
+Initialize the tunable config file (one-time, won't overwrite if already exists):
+
+```bash
+python3.11 -m typed.config --init
+# Windows: py -3.11 -m typed.config --init
+```
+
+This writes `~/.synaptic-memory/config.json` with all defaults. Edit it to change any tunable — takes effect on next hook invocation without touching Python code. Verify the effective config at any time:
+
+```bash
+python3.11 -m typed.config
+# Windows: py -3.11 -m typed.config
+```
+
 Run the bridge script to sync any existing memory into the graphify graph:
 
 ```bash

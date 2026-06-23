@@ -233,7 +233,7 @@ What consolidation does per run:
 1. Walks all typed drawers — salience reranks and auto-pins top 5%
 2. Detects contradictions (high-similarity opposing drawer pairs)
 3. Flags stale drawers (references files modified since last run)
-4. Archives zero-hit drawers older than 90 days
+4. Archives drawers that have exceeded their tier TTL (ephemeral=1d, short-term=7d, long-term=90d; permanent never archived; pinned always exempt)
 5. Discovers all projects under `SYNAPTIC_SCAN_ROOT` with a built graphify graph
 6. Runs `mempal_to_graphify.py` + `graphify_wiki.py --clean` for each project
 7. Writes `consolidate-report.json`; opens Notepad error log on Windows if anything failed
@@ -401,6 +401,79 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 
 ---
 
+## Configuration
+
+All tunables live in `~/.synaptic-memory/config.json`. Edit this file to change any value — takes effect on the next hook invocation or session start without touching Python.
+
+**Generate the default file (first time):**
+
+```bash
+py -3.11 -m typed.config --init
+```
+
+**View current effective config:**
+
+```bash
+py -3.11 -m typed.config
+```
+
+**Example — increase retrieval depth and tighten duplicate detection:**
+
+```json
+{
+  "retrieval": {
+    "hop_depth": 3,
+    "max_search_calls": 16,
+    "session_start_top_k": 5
+  },
+  "write": {
+    "dupe_threshold": 0.95
+  }
+}
+```
+
+Missing keys fall back to defaults. You never need to specify the full file — only the keys you want to override.
+
+**All sections and their defaults:**
+
+| Section | Key | Default | What it controls |
+| --- | --- | --- | --- |
+| `retrieval` | `session_start_top_k` | 3 | Drawers injected at SessionStart and PreCompact |
+| `retrieval` | `summary_max_chars` | 180 | Summary line length in session inject |
+| `retrieval` | `max_search_calls` | 12 | Hard cap on ChromaDB calls per spreading activation invocation |
+| `retrieval` | `frontier_fanout` | 3 | How many activated drawers to ripple outward from per hop |
+| `retrieval` | `hop_depth` | 2 | Number of spreading activation hops |
+| `retrieval` | `hop_decay` | 0.5 | Score multiplier per hop (0.5 = halved each hop) |
+| `retrieval` | `graphify_hop_discount` | 0.6 | Extra discount applied to graphify-derived hits |
+| `retrieval` | `graphify_refs_per_hop` | 2 | File/code refs to extract per hop for graphify queries |
+| `retrieval` | `graphify_labels_per_ref` | 2 | Labels to query graphify for per extracted ref |
+| `adhd` | `enabled` | false | Master switch for ADHD behavior layer |
+| `adhd` | `level` | 0 | 0=off, 1=impulse only, 2=+drift, 3=+burst |
+| `adhd` | `impulse_threshold` | 0.88 | Score above which a seed triggers an interrupt event |
+| `adhd` | `impulse_margin` | 0.18 | Top-1 vs top-2 gap to trigger margin interrupt |
+| `adhd` | `impulse_mode` | "prepend" | How interrupt hits are merged: "prepend" or "fast_path" |
+| `adhd` | `p_inattention` | 0.05 | Probability of query drift per invocation |
+| `adhd` | `burst_n` | 3 | Parallel variant queries (ParallelSearchLayer) |
+| `adhd` | `max_extra_drawers` | 2 | Max ADHD-sourced drawers added on top of base results |
+| `adhd` | `burst_timeout_ms` | 200 | Timeout for parallel burst searches |
+| `consolidation` | `contradiction_sim_threshold` | 0.88 | Cosine similarity above which opposing-type drawers are flagged |
+| `consolidation` | `pin_top_fraction` | 0.05 | Top fraction of drawers auto-pinned per scope during consolidation |
+| `consolidation` | `scan_max_depth` | 6 | Directory depth limit for project discovery |
+| `write` | `dupe_threshold` | 0.92 | Cosine similarity above which a new drawer is rejected as duplicate |
+| `telemetry` | `auto_demote_threshold` | 2 | cite_then_correct hits before a drawer is auto-demoted to confidence=low |
+| `budget` | `week_4_target_drop` | 0.20 | Required token reduction by week 4 (20%) |
+| `budget` | `week_8_target_drop` | 0.30 | Required token reduction by week 8 (30%) |
+| `budget` | `write_overhead_budget_fraction` | 0.30 | Max fraction of read savings that drawer writes may cost |
+
+**Env var overrides** (take precedence over config.json):
+
+| Env var | Effect |
+| --- | --- |
+| `SYNAPTIC_ADHD_LEVEL=1` | Enable impulse-only mode (overrides `adhd.level`) |
+| `SYNAPTIC_ADHD_DISABLE=1` | Force-disable ADHD layer regardless of config |
+
+---
+
 ## File reference
 
 | File / Folder | Committed | Purpose |
@@ -423,7 +496,9 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 | `hooks/post_tool_edit.py` | Yes | PostToolUse/Edit hook — graphify neighbor surfacing after edits |
 | `scripts/mempal_to_graphify.py` | Yes | Bridge: mine ChromaDB → inject into graphify |
 | `scripts/graphify_wiki.py` | Yes | Obsidian wiki generator |
-| `typed/` | Yes | Typed memory package (types, write, read, consolidate, telemetry, budget) |
+| `typed/config.py` | Yes | Central config loader — reads `~/.synaptic-memory/config.json`, all tunables |
+| `typed/adhd.py` | Yes | ADHD behavior layer — `ADHDConfig`, `ImpulsivityMode`, `InterruptLayer` |
+| `typed/` | Yes | Typed memory package (types, write, read, consolidate, telemetry, budget, config, adhd) |
 | `tests/` | Yes | Unit tests |
 | `graphify-out/` | No (gitignored) | Auto-generated graph + Obsidian vault |
 
@@ -448,6 +523,10 @@ python3.11 -m typed.budget --record --tokens-in 42000 --tokens-out 8500 --note "
 | Palace HNSW diverged | Run `python3.11 -m mempalace repair --yes` |
 | Consolidation task missing | Re-run the `Register-ScheduledTask` PowerShell block in Step 7 |
 | `consolidate-report.json` empty | Task ran but mempalace has no typed drawers yet — complete sessions first |
+| Config not taking effect | `get_config()` is cached per process — changes to `config.json` take effect on next hook invocation |
+| `config.json` doesn't exist | Run `py -3.11 -m typed.config --init` to write defaults |
+| Typo in `config.json` crashes silently | JSON parse errors are swallowed — run `py -3.11 -m typed.config` to verify effective config |
+| ADHD layer not activating | Set `"adhd": {"enabled": true, "level": 1}` in `config.json`, or `SYNAPTIC_ADHD_LEVEL=1` env var |
 
 ---
 
@@ -466,6 +545,8 @@ The full stack is implemented and running:
 - Spreading activation retrieval — mempalace + graphify structural hops at every read moment
 - Exponential decay / half-life salience — per-tier decay curves replace hard TTL cutoffs
 - TTL-tiered expiration — EPHEMERAL (1d), SHORT_TERM (7d), LONG_TERM (90d), PERMANENT tiers
+- Dynamic config — all tunables in `~/.synaptic-memory/config.json`, no code changes needed
+- ADHD InterruptLayer — interrupt-driven early-exit retrieval wired into spreading activation (disabled by default)
 
 **The next 90 days are a testing and hardening period.** Real-world usage across multiple projects will surface edge cases, performance issues, and UX friction before a public release.
 
@@ -494,40 +575,60 @@ Four explicit tiers in `MemoryTier` (typed/types.py), driving both `salience()` 
 
 Pinned drawers are always exempt from archiving regardless of tier.
 
+### Done — dynamic config system (2026-06-23)
+
+All tunables centralized in `~/.synaptic-memory/config.json` via `typed/config.py`. Every module (`read.py`, `adhd.py`, `consolidate.py`, `write.py`, `telemetry.py`, `budget.py`) reads from `get_config()` at runtime — no more scattered module-level constants. See [Configuration](#configuration) section above.
+
+### Done — ADHD InterruptLayer (2026-06-23)
+
+`typed/adhd.py` implements `InterruptLayer` — interrupt-driven early-exit that prepends high-confidence seed hits to the final ranked results without waiting for full hop expansion. Wired into `spreading_activation_search()` via `check_seeds()` (pre-hop) and `post_merge()` (post-ranking). Disabled by default (`enabled=false`, `level=0`). Activate via `SYNAPTIC_ADHD_LEVEL=1` or config.json. 19 tests in `tests/test_adhd.py` all pass.
+
 ### Done — retrieval audit + search-call budget (2026-06-10)
 
 `spreading_activation_search()` now logs every call to `~/.synaptic-memory/retrieval-audit.jsonl` (ts, query, scope, top_k, results with drawer_id/score/type/snippet, duration_ms). Run `py -m typed.budget --retrieval-report` for a summary.
 
 The 2-week audit (882 retrievals, 2026-05-24 → 2026-06-10) found the council's "wrong top-3" prerequisite was satisfiable (290/882 = 33% had top-1 score < 0.3, mostly graphify-hop noise on EMR.REPORTS code-symbol queries) — but the dominant failure was **latency, not relevance**: avg 24.5s per call, max 469s (7.8 min) on EMR.REPORTS. Root cause: hop expansion x graphify fan-out could trigger 100+ ChromaDB `client.search()` calls per invocation.
 
-Fix applied in `typed/read.py`:
+**Fix 1 applied (2026-06-10) in `typed/read.py`:**
 
 - `MAX_SEARCH_CALLS = 12` — hard cap on `client.search()` calls per invocation
 - `_FRONTIER_FANOUT = 3` — only ripple outward from the 3 strongest activations per hop (was: all of them)
 - Graphify fan-out reduced from 3 refs x 3 labels to `_GRAPHIFY_REFS_PER_HOP = 2` x `_GRAPHIFY_LABELS_PER_REF = 2`
 
-All 56 existing tests pass unchanged. Re-check `--retrieval-report` after another week of usage to confirm avg duration has dropped from the 24.5s baseline.
+**1-week re-check (2026-06-17) — Fix 1 was insufficient:**
 
-### Planned — ADHD behavior layer (`typed/adhd.py`)
+836 new records (post-fix) showed avg duration *increased* from 24.5s → 70.6s. Root cause identified: the ChromaDB `PersistentClient` (HNSW index) was being reloaded from disk on every individual `_search()` call inside `spreading_activation_search()` — not just once per invocation. With the collection growing from ~700 → ~1700 drawers, each cold load cost 5-8s. MAX_SEARCH_CALLS=12 meant 12 cold loads per invocation = 60-96s observed.
+
+**Fix 2 applied (2026-06-17) in `typed/client.py`:**
+
+- `InProcessClient._col` — caches the ChromaDB collection object after first load; all subsequent `_search()` calls within the same invocation reuse it (1 disk load instead of N)
+- `InProcessClient.get_or_create()` — process-level singleton cache keyed by `(palace_path, collection_name)`; `read.py` now calls this everywhere instead of `InProcessClient()`
+- 2 corrupted lines removed from `retrieval-audit.jsonl`
+
+All 56 tests pass. Re-check `--retrieval-report` after another week to confirm avg duration has dropped from the 70.6s post-Fix-1 baseline.
+
+### In progress — ADHD behavior layer (`typed/adhd.py`)
 
 A non-linear retrieval layer that adds human-like associative behavior on top of `spreading_activation_search()`. Modeled on three ADHD cognitive patterns that outperform focused search for serendipitous discovery.
 
 **Why:** Linear retrieval (query → top-k) misses bridging memories, cross-domain patterns, and high-value low-usage drawers. The ADHD layer surfaces what focused search buries — without replacing it.
 
-**Status:** Retrieval is now instrumented (see "Done — retrieval audit" above) and the latency blocker has been fixed. Before building this layer, confirm with another `--retrieval-report` run that latency is under control, then re-evaluate whether the 33% low-relevance rate on code-symbol queries still justifies `QueryDriftLayer` / `InterruptLayer`.
+**Status:** Module 1 (InterruptLayer) shipped 2026-06-23. Modules 2 and 3 are next.
 
 #### The three modules
 
-**1. InterruptLayer (Impulsivity) — build first, highest ROI**
+**1. InterruptLayer (Impulsivity) — DONE (2026-06-23)**
 
 Interrupt-driven early-exit retrieval. Surfaces a strong hit immediately without waiting for full hop expansion.
 
-- Mode: `LOW` by default — fire on score >= 0.88 only
-- Three interrupt types: `threshold` (score clears cutoff), `margin` (top-1 dominates top-2 by > 0.18), `saturation` (hop frontier has gone cold)
-- **Do NOT use phasic gain score multiplier** — inflating scores before threshold check breaks the contract for all downstream callers
-- `ImpulsivityMode` enum: `OFF / LOW / MEDIUM / HIGH` — hooks use `HIGH` (30ms budget), session start uses `LOW`
+- Mode: disabled by default (`enabled=false`) — activate via `SYNAPTIC_ADHD_LEVEL=1` or config.json
+- Three interrupt types: `threshold` (score >= 0.88), `margin` (top-1 dominates top-2 by > 0.18), `saturation` (frontier gone cold)
+- Wired into `spreading_activation_search()`: `check_seeds()` pre-hop, `post_merge()` post-ranking
+- **No phasic gain score multiplier** — inflating scores before threshold check would break all downstream callers
+- `ImpulsivityMode` enum: `OFF / LOW / MEDIUM / HIGH` — config.json controls the default, `SYNAPTIC_ADHD_LEVEL` overrides
+- 19 passing tests in `tests/test_adhd.py`
 
-**2. QueryDriftLayer (Inattention) — build second**
+**2. QueryDriftLayer (Inattention) — build next**
 
 Stochastic query mutation. With probability `p=0.05` (NOT 0.25 — too destructive), mutates the query before passing to core search via one of three strategies:
 

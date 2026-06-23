@@ -19,6 +19,13 @@ from datetime import datetime
 from typing import Any, Optional
 
 
+# Process-level cache: (palace_path, collection_name) → InProcessClient.
+# Prevents re-loading the ChromaDB HNSW index on every spreading_activation_search()
+# call. Each hook is a fresh process, so this lives for the hook invocation only —
+# but that's enough to collapse 12 cold loads per invocation into 1.
+_CLIENT_CACHE: dict[tuple, "InProcessClient"] = {}
+
+
 @dataclass
 class SearchHit:
     drawer_id: str
@@ -72,11 +79,33 @@ class InProcessClient(MempalaceClient):
         cfg = MempalaceConfig()
         self._palace_path = palace_path or cfg.palace_path
         self._collection_name = collection_name or cfg.collection_name
+        self._col = None  # loaded once on first search, then reused
+
+    @classmethod
+    def get_or_create(
+        cls,
+        palace_path: Optional[str] = None,
+        collection_name: Optional[str] = None,
+    ) -> "InProcessClient":
+        """Return a cached InProcessClient for this (palace_path, collection_name) pair.
+
+        Collapses N cold ChromaDB PersistentClient loads per spreading_activation_search()
+        invocation into 1. Cache lives for the Python process lifetime (one hook run).
+        """
+        from mempalace.config import MempalaceConfig
+        cfg = MempalaceConfig()
+        key = (palace_path or cfg.palace_path, collection_name or cfg.collection_name)
+        if key not in _CLIENT_CACHE:
+            _CLIENT_CACHE[key] = cls(palace_path, collection_name)
+        return _CLIENT_CACHE[key]
 
     def _collection(self, create: bool = False):
+        if self._col is not None:
+            return self._col
         from mempalace.palace import get_collection
         try:
-            return get_collection(self._palace_path, self._collection_name, create=create)
+            self._col = get_collection(self._palace_path, self._collection_name, create=create)
+            return self._col
         except Exception as exc:
             # ChromaDB raises InvalidCollectionException (not NotFoundError) in newer
             # versions when a collection doesn't exist yet. mempalace's chroma.py catches
@@ -86,12 +115,13 @@ class InProcessClient(MempalaceClient):
                 raise
             import chromadb
             os.makedirs(self._palace_path, exist_ok=True)
-            _client = chromadb.PersistentClient(path=self._palace_path)
-            _client.get_or_create_collection(
+            _chroma = chromadb.PersistentClient(path=self._palace_path)
+            _chroma.get_or_create_collection(
                 self._collection_name,
                 metadata={"hnsw:space": "cosine", "hnsw:num_threads": 1},
             )
-            return get_collection(self._palace_path, self._collection_name, create=False)
+            self._col = get_collection(self._palace_path, self._collection_name, create=False)
+            return self._col
 
     def add_drawer(self, wing: str, room: str, content: str) -> str:
         col = self._collection(create=True)

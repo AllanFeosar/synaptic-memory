@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Optional
 
 from typed.client import InProcessClient, MempalaceClient
+from typed.config import get_config
 from typed.types import (
     Confidence,
     DrawerType,
@@ -22,12 +23,6 @@ from typed.types import (
     parse_drawer,
     serialize_drawer,
 )
-
-
-# Default similarity threshold for "this is a duplicate."
-# Tune in production: 0.92 is conservative, 0.85 catches more dupes but risks
-# merging genuinely-distinct decisions.
-DEFAULT_DUPE_THRESHOLD = 0.92
 
 
 class DuplicateDrawerError(Exception):
@@ -58,7 +53,7 @@ def write_drawer(
     supersedes: Optional[str] = None,
     pinned: bool = False,
     client: Optional[MempalaceClient] = None,
-    dupe_threshold: float = DEFAULT_DUPE_THRESHOLD,
+    dupe_threshold: Optional[float] = None,
     skip_dupe_check: bool = False,
 ) -> TypedDrawer:
     """Persist a typed drawer.
@@ -68,6 +63,7 @@ def write_drawer(
         DuplicateDrawerError if an embedding-similar drawer exists.
     """
     client = client or InProcessClient()
+    dupe_threshold = dupe_threshold if dupe_threshold is not None else get_config().write.dupe_threshold
 
     drawer = TypedDrawer.new(
         type=type,

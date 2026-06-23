@@ -32,35 +32,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from typed.adhd import ADHDConfig, InterruptLayer
 from typed.client import InProcessClient, MempalaceClient, SearchHit
+from typed.config import get_config
 from typed.types import MemoryTier, TypedDrawer, parse_drawer, serialize_drawer
 
 if TYPE_CHECKING:
     from typed.graphify_client import GraphifyClient
-
-
-# Hard cap on tokens injected at SessionStart.
-# Approximate: 1 token ≈ 4 chars for English. 3 summaries × ~180 chars ≈ 135 tokens.
-SESSION_START_TOP_K = 3
-SUMMARY_MAX_CHARS = 180
-
-# Extra discount applied to graphify-sourced hops vs pure semantic hops.
-# Structural neighbors are less certain than direct embedding similarity.
-_GRAPHIFY_HOP_DISCOUNT = 0.6
-
-# Hard cap on mempalace client.search() calls per spreading_activation_search()
-# invocation. Hop expansion x graphify fan-out without this cap can trigger
-# 100+ ChromaDB calls and multi-minute retrievals (observed up to 469s for
-# EMR.REPORTS in retrieval-audit.jsonl).
-MAX_SEARCH_CALLS = 12
-
-# Only ripple outward from the N strongest frontier members per hop — caps
-# fan-out so the search budget is spent on the most promising candidates.
-_FRONTIER_FANOUT = 3
-
-# Graphify hop fan-out per seed drawer: code refs extracted x labels per ref.
-_GRAPHIFY_REFS_PER_HOP = 2
-_GRAPHIFY_LABELS_PER_REF = 2
 
 # Regex for file references in drawer bodies, e.g. `auth.py`, `jwt.ts`
 _FILE_REF_RE = re.compile(r"`([^`]+\.(?:py|ts|tsx|js|jsx|go|rs|java|cs|md))`")
@@ -98,17 +76,16 @@ def _extract_code_refs(body: str) -> list[str]:
 def search_typed(
     query: str,
     scope: Optional[str] = None,
-    top_k: int = SESSION_START_TOP_K,
+    top_k: Optional[int] = None,
     *,
     client: Optional[MempalaceClient] = None,
     include_low_confidence: bool = True,
     tier_filter: Optional[MemoryTier] = None,
 ) -> list[TypedDrawer]:
-    """Semantic search returning only typed drawers, reranked by salience.
-
-    tier_filter: if set, only return drawers of that tier.
-    """
-    client = client or InProcessClient()
+    """Semantic search returning only typed drawers, reranked by salience."""
+    cfg = get_config().retrieval
+    top_k = top_k or cfg.session_start_top_k
+    client = client or InProcessClient.get_or_create()
     raw_hits = client.search(query=query, top_k=top_k * 3, wing=scope.lower() if scope else None)
     drawers: list[TypedDrawer] = []
     for h in raw_hits:
@@ -128,50 +105,29 @@ def search_typed(
 def spreading_activation_search(
     query: str,
     scope: Optional[str] = None,
-    top_k: int = SESSION_START_TOP_K,
-    depth: int = 2,
-    hop_decay: float = 0.5,
+    top_k: Optional[int] = None,
+    depth: Optional[int] = None,
+    hop_decay: Optional[float] = None,
     *,
     client: Optional[MempalaceClient] = None,
     graphify_client: Optional["GraphifyClient"] = None,
+    adhd_config: Optional[ADHDConfig] = None,
 ) -> list[TypedDrawer]:
-    """Spreading activation retrieval with optional graphify structural hops.
+    """Spreading activation retrieval with optional graphify structural hops."""
+    cfg = get_config().retrieval
+    top_k = top_k if top_k is not None else cfg.session_start_top_k
+    depth = depth if depth is not None else cfg.hop_depth
+    hop_decay = hop_decay if hop_decay is not None else cfg.hop_decay
 
-    Phase 1 — Mempalace semantic hops (always active):
-      Starts with semantic seed hits, ripples outward through related drawers
-      at each hop with activation decayed by hop_decay per step.
-
-    Phase 2 — Graphify structural hops (when graphify_client is provided):
-      After each mempalace hop, extracts file/code references from drawer
-      bodies, queries graphify for structurally adjacent nodes (imports,
-      calls, etc.), then searches mempalace for memories about those nodes.
-      Graphify-sourced hops receive an extra _GRAPHIFY_HOP_DISCOUNT (0.6×)
-      because structural adjacency is weaker evidence than embedding similarity.
-
-    Together: surfaces context you didn't explicitly ask for.
-      - A query about "auth" activates a JWT decision (mempalace hop)
-      - That drawer mentions `jwt.py` → graphify finds JwtService neighbor
-      - Mempalace is searched for memories about JwtService (graphify hop)
-      - A postmortem about token expiry edge cases surfaces
-
-    Args:
-        query:           The search query (typically scope + intent hint).
-        scope:           Wing to search within. None = global search.
-        top_k:           Number of drawers to return.
-        depth:           Number of hops to ripple. 2 is a good default.
-        hop_decay:       Activation multiplier per hop (0.5 = halved each hop).
-        graphify_client: Optional graphify backend. When None, graphify hops
-                         are skipped and behavior is identical to before.
-    """
     _t0 = time.perf_counter()
-    client = client or InProcessClient()
+    client = client or InProcessClient.get_or_create()
     wing = scope.lower() if scope else None
+    _interrupt = InterruptLayer(adhd_config or ADHDConfig())
 
-    # Budget mempalace search() calls — see MAX_SEARCH_CALLS.
     search_calls = [0]
 
     def _search(q: str, k: int):
-        if search_calls[0] >= MAX_SEARCH_CALLS:
+        if search_calls[0] >= cfg.max_search_calls:
             return []
         search_calls[0] += 1
         return client.search(query=q, top_k=k, wing=wing)
@@ -191,6 +147,8 @@ def spreading_activation_search(
             activation[d.drawer_id] = (d, score)
             frontier.append((d, score))
 
+    _interrupt.check_seeds(frontier)
+
     # Ripple outward hop by hop
     for hop in range(1, depth + 1):
         decay = hop_decay ** hop
@@ -198,10 +156,9 @@ def spreading_activation_search(
 
         # Only expand the strongest activations — caps fan-out instead of
         # rippling from every drawer activated so far.
-        ripple_from = sorted(frontier, key=lambda kv: -kv[1])[:_FRONTIER_FANOUT]
+        ripple_from = sorted(frontier, key=lambda kv: -kv[1])[:cfg.frontier_fanout]
 
         for seed_drawer, seed_score in ripple_from:
-            # --- Phase 1: mempalace semantic hop ---
             neighbor_query = seed_drawer.body[:300]
             neighbors = _search(neighbor_query, 3)
             for hit in neighbors:
@@ -212,25 +169,22 @@ def spreading_activation_search(
                 activation[d.drawer_id] = (d, score)
                 next_frontier.append((d, score))
 
-            # --- Phase 2: graphify structural hop (optional) ---
             if graphify_client is not None:
                 code_refs = _extract_code_refs(seed_drawer.body)
-                for ref in code_refs[:_GRAPHIFY_REFS_PER_HOP]:
-                    g_labels = graphify_client.query(ref, limit=_GRAPHIFY_LABELS_PER_REF)
+                for ref in code_refs[:cfg.graphify_refs_per_hop]:
+                    g_labels = graphify_client.query(ref, limit=cfg.graphify_labels_per_ref)
                     for label in g_labels:
-                        # Search mempalace for memories mentioning this code node
                         g_hits = _search(label, 2)
                         for hit in g_hits:
                             d = _hit_to_drawer(hit)
                             if d is None or d.drawer_id in activation:
                                 continue
-                            # Structural hops discounted vs semantic hops
-                            score = hit.score * decay * _GRAPHIFY_HOP_DISCOUNT
+                            score = hit.score * decay * cfg.graphify_hop_discount
                             activation[d.drawer_id] = (d, score)
                             next_frontier.append((d, score))
 
         frontier = next_frontier
-        if not frontier or search_calls[0] >= MAX_SEARCH_CALLS:
+        if not frontier or search_calls[0] >= cfg.max_search_calls:
             break
 
     # Rank by activation * salience — rewards both relatedness and importance
@@ -238,6 +192,7 @@ def spreading_activation_search(
         activation.values(),
         key=lambda kv: -(kv[1] + kv[0].salience() * 0.3),
     )
+    ranked = _interrupt.post_merge(ranked)
     top = ranked[:top_k]
 
     try:
@@ -284,24 +239,25 @@ def inject_session_start(
         - [drw_zzz] recipe/deploy: Standard rollback steps ...
         <!-- /typed/sessionstart -->
     """
+    cfg = get_config().retrieval
     query = f"{scope} {intent_hint}".strip() or scope
     drawers = spreading_activation_search(
         query=query,
         scope=scope,
-        top_k=SESSION_START_TOP_K,
+        top_k=cfg.session_start_top_k,
         client=client,
         graphify_client=graphify_client,
     )
 
     if not drawers:
-        return ""  # nothing to inject; don't spend tokens on a header
+        return ""
 
     lines = [
         "<!-- typed/sessionstart -->",
         f"## Memory ({len(drawers)} drawers — call expand_drawer(id) for full text)",
     ]
     for d in drawers:
-        lines.append(f"- {d.summary(max_chars=SUMMARY_MAX_CHARS)}")
+        lines.append(f"- {d.summary(max_chars=cfg.summary_max_chars)}")
     lines.append("<!-- /typed/sessionstart -->")
     return "\n".join(lines)
 
@@ -313,7 +269,7 @@ def expand_drawer(
     bump_usage: bool = True,
 ) -> Optional[TypedDrawer]:
     """Fetch full drawer by id. Increments usage_count for trust calibration."""
-    client = client or InProcessClient()
+    client = client or InProcessClient.get_or_create()
     hits = client.search(query=drawer_id, top_k=1)
     if not hits:
         return None
@@ -338,7 +294,7 @@ def file_summary(
     client: Optional[MempalaceClient] = None,
 ) -> Optional[str]:
     """Try to find a stored summary for a file before reading the full file."""
-    client = client or InProcessClient()
+    client = client or InProcessClient.get_or_create()
     query = f"file_summary {file_path}"
     drawers = search_typed(query=query, scope=scope, top_k=1, client=client)
     if not drawers:

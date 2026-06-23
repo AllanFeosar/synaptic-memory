@@ -32,14 +32,12 @@ from pathlib import Path
 from statistics import mean
 from typing import Optional
 
+from typed.config import get_config
+
 
 DEFAULT_LOG = Path.home() / ".synaptic-memory" / "budget.jsonl"
 DEFAULT_RETRIEVAL_LOG = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
 
-# Targets from the design spec
-WEEK_4_TARGET_DROP = 0.20  # 20% reduction vs baseline
-WEEK_8_TARGET_DROP = 0.30
-WRITE_OVERHEAD_BUDGET_FRACTION = 0.30  # write tokens must stay below 30% of read savings
 
 
 @dataclass
@@ -249,9 +247,10 @@ def weekly_report(log_path: Path = DEFAULT_LOG) -> str:
         read_s = mean(r.file_summary_hits * 1500 for r in weeks)
 
         verdict = []
-        if idx >= 4 and -change < WEEK_4_TARGET_DROP:
+        bcfg = get_config().budget
+        if idx >= 4 and -change < bcfg.week_4_target_drop:
             verdict.append("⚠ week-4 target missed")
-        if write_o > read_s * WRITE_OVERHEAD_BUDGET_FRACTION and read_s > 0:
+        if write_o > read_s * bcfg.write_overhead_budget_fraction and read_s > 0:
             verdict.append("⚠ write overhead too high")
         if not verdict:
             verdict.append("ok")
@@ -268,7 +267,7 @@ def weekly_report(log_path: Path = DEFAULT_LOG) -> str:
     if last_idx >= 4:
         last_avg = mean(r.total() for r in buckets[last_idx])
         change = (last_avg - baseline_avg) / baseline_avg
-        if -change < WEEK_4_TARGET_DROP * 0.5:  # <10% drop = kill switch
+        if -change < get_config().budget.week_4_target_drop * 0.5:
             lines.append("KILL SWITCH: <10% reduction by week 4. Simplify aggressively.")
 
     return "\n".join(lines)

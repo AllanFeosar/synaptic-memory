@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from typed.client import InProcessClient, MempalaceClient
+from typed.config import get_config
 from typed.types import (
     Confidence,
     DrawerType,
@@ -39,15 +40,11 @@ from typed.types import (
 
 
 # ---------------------------------------------------------------------------
-# Tunables
+# Paths (not tunables — these are fixed filesystem locations)
 # ---------------------------------------------------------------------------
 
-FORGET_AFTER_DAYS = 90
-CONTRADICTION_SIM_THRESHOLD = 0.88
-PIN_TOP_FRACTION = 0.05
 DEFAULT_REPORT_PATH = Path.home() / ".synaptic-memory" / "consolidate-report.json"
 DEFAULT_ERROR_LOG   = Path.home() / ".synaptic-memory" / "sync-errors.log"
-SCAN_MAX_DEPTH = 6
 
 # Directories to skip when scanning for projects
 _SKIP_DIRS = {
@@ -117,7 +114,7 @@ def _rerank_and_pin(
 
     for scope, group in by_scope.items():
         group.sort(key=lambda kv: -kv[1].salience())
-        cutoff = max(1, int(len(group) * PIN_TOP_FRACTION))
+        cutoff = max(1, int(len(group) * get_config().consolidation.pin_top_fraction))
         for mid, d in group[:cutoff]:
             if not d.pinned:
                 d.pinned = True
@@ -151,7 +148,7 @@ def _detect_contradictions(
         for hit in hits:
             if hit.drawer_id == mid:
                 continue
-            if hit.score < CONTRADICTION_SIM_THRESHOLD:
+            if hit.score < get_config().consolidation.contradiction_sim_threshold:
                 continue
             try:
                 other = parse_drawer(hit.content)
@@ -302,7 +299,8 @@ def _read_scan_root_from_mcp(synaptic_repo: Optional[Path] = None) -> Optional[P
 # Project discovery
 # ---------------------------------------------------------------------------
 
-def _discover_projects(scan_root: Path, max_depth: int = SCAN_MAX_DEPTH) -> list[Path]:
+def _discover_projects(scan_root: Path, max_depth: Optional[int] = None) -> list[Path]:
+    max_depth = max_depth if max_depth is not None else get_config().consolidation.scan_max_depth
     """Walk scan_root and return every project root that has graphify-out/graph.json."""
     found: list[Path] = []
 

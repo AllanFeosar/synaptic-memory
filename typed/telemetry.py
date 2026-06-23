@@ -21,10 +21,8 @@ from __future__ import annotations
 from typing import Iterable, Optional
 
 from typed.client import InProcessClient, MempalaceClient
+from typed.config import get_config
 from typed.types import Confidence, parse_drawer, serialize_drawer
-
-
-AUTO_DEMOTE_THRESHOLD = 2
 
 
 def mark_correction(
@@ -49,7 +47,7 @@ def mark_correction(
         if d.drawer_id != drawer_id:
             continue
         d.cite_then_correct += 1
-        if d.cite_then_correct >= AUTO_DEMOTE_THRESHOLD and d.confidence != Confidence.LOW:
+        if d.cite_then_correct >= get_config().telemetry.auto_demote_threshold and d.confidence != Confidence.LOW:
             d.confidence = Confidence.LOW
         client.update_drawer(hits[0].drawer_id, serialize_drawer(d))
         out[drawer_id] = d.confidence.value

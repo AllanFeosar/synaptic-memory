@@ -17,13 +17,21 @@
          │  - inject ~150t  │    │  - embedding dedup │
          │  - expand lazy   │    │  - supersedes link │
          │  - file_summary  │    │  - frontmatter     │
-         └────────┬─────────┘    └─────────┬──────────┘
+         │  ┌─────────────┐ │    └─────────┬──────────┘
+         │  │  adhd.py    │ │              │
+         │  │ InterruptLayer│              │
+         │  │ check_seeds │ │              │
+         │  │ post_merge  │ │              │
+         │  └─────────────┘ │              │
+         └────────┬─────────┘              │
                   │                        │
                   └─────────┬──────────────┘
                             ▼
                 ┌──────────────────────┐
                 │    client.py         │
-                │  MempalaceClient     │  (InProcess | Mock)
+                │  InProcessClient     │
+                │  get_or_create()     │  ← process-level singleton
+                │  _col cache          │  ← 1 HNSW load per process
                 └──────────┬───────────┘
                            │
             ┌──────────────▼──────────────┐
@@ -40,7 +48,7 @@
             │  - salience rerank         │
             │  - contradiction detect    │
             │  - stale-flag (file mtime) │
-            │  - archive zero-hit >90d   │
+            │  - archive by tier TTL     │
             └──────────────┬─────────────┘
                            │
                            ▼
@@ -61,6 +69,14 @@
                            ▼
                       Obsidian vault
                       (human read-only)
+
+         ┌──────────────────────────────────┐
+         │  config.py  (all modules read)   │
+         │  ~/.synaptic-memory/config.json  │
+         │  → retrieval / adhd /            │
+         │    consolidation / write /       │
+         │    telemetry / budget            │
+         └──────────────────────────────────┘
 ```
 
 ## Why graphify stays offline
@@ -77,12 +93,12 @@ analysis, then renders the Obsidian wiki.
 
 ## Memory tier mapping
 
-| Tier       | Storage                   | Lifespan | Created by                      |
-|------------|---------------------------|----------|---------------------------------|
-| Working    | Claude's context window   | turn     | the conversation                |
-| Episodic   | mempalace drawers         | 90d      | `write_decision`, `write_*`     |
-| Semantic   | pinned drawers + graphify | ∞        | consolidate.py auto-pins top 5% |
-| Procedural | drawers with type=recipe  | ∞        | `write_recipe`                  |
+| Tier       | Storage                   | Lifespan                        | Created by                      |
+|------------|---------------------------|---------------------------------|---------------------------------|
+| Working    | Claude's context window   | turn                            | the conversation                |
+| Episodic   | mempalace drawers         | 1d / 7d / 90d (by MemoryTier)  | `write_decision`, `write_*`     |
+| Semantic   | pinned drawers + graphify | ∞                               | consolidate.py auto-pins top 5% |
+| Procedural | drawers with type=recipe  | ∞                               | `write_recipe`                  |
 
 ## Token math
 
@@ -108,6 +124,16 @@ Over 100 sessions: ~1M tokens saved. Compounds as the palace gets denser.
 | `mempalace.searcher.build_where_filter` API  | `typed/client.py` `search()` only                   |
 | ChromaDB metadata field names                | `typed/client.py` `add_drawer()` / `search()` only  |
 
-All v2 logic (`write.py`, `read.py`, `consolidate.py`) talks only to the
-`MempalaceClient` abstract interface — if mempalace updates, fix one file
-(`typed/client.py`).
+All business logic (`write.py`, `read.py`, `adhd.py`, `consolidate.py`, `telemetry.py`, `budget.py`)
+talks only to the `MempalaceClient` abstract interface — if mempalace updates, fix one file
+(`typed/client.py`). All tunables are centralized in `typed/config.py` — no constants are
+scattered in module bodies.
+
+## Config coupling surface (what breaks if config.json schema changes)
+
+| What changes                                 | What breaks here                                    |
+|----------------------------------------------|-----------------------------------------------------|
+| Section name renamed (e.g. `retrieval` → `r`)| All callers of `get_config().<section>` in 6 modules|
+| Field added with no default                  | Nothing — `_merge()` only sets fields that exist    |
+| Field removed                                | Nothing — callers use the dataclass default         |
+| `CONFIG_PATH` moved                          | `typed/config.py` `CONFIG_PATH` constant only       |
