@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import enum
+import json
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from typed.types import TypedDrawer
@@ -17,6 +19,65 @@ class ImpulsivityMode(str, enum.Enum):
     HIGH = "high"
 
 
+# ---------------------------------------------------------------------------
+# Adaptive threshold calibration (cached per process)
+# ---------------------------------------------------------------------------
+
+_calibrated: Optional[float] = None
+
+
+def _calibrate_threshold(
+    percentile: float = 0.95,
+    window: int = 200,
+    min_samples: int = 30,
+) -> Optional[float]:
+    """Compute the Nth percentile of top-1 scores from recent retrieval audit data.
+
+    Returns None if insufficient data — caller should fall back to the fixed threshold.
+    Cached per process (each hook invocation = one process = one calibration).
+    """
+    global _calibrated
+    if _calibrated is not None:
+        return _calibrated
+
+    log_path = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
+    if not log_path.exists():
+        return None
+
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    top1_scores: list[float] = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+            results = rec.get("results", [])
+            if results and "score" in results[0]:
+                top1_scores.append(results[0]["score"])
+        except (ValueError, TypeError):
+            continue
+        if len(top1_scores) >= window:
+            break
+
+    if len(top1_scores) < min_samples:
+        return None
+
+    top1_scores.sort()
+    idx = min(int(len(top1_scores) * percentile), len(top1_scores) - 1)
+    _calibrated = top1_scores[idx]
+    return _calibrated
+
+
+def reset_calibration() -> None:
+    """Clear cached calibration (for testing)."""
+    global _calibrated
+    _calibrated = None
+
+
 @dataclass
 class ADHDConfig:
     enabled: bool = False
@@ -24,6 +85,10 @@ class ADHDConfig:
     impulse_threshold: float = 0.88
     impulse_margin: float = 0.18
     impulse_mode: str = "prepend"
+    adaptive_threshold: bool = True
+    adaptive_percentile: float = 0.95
+    adaptive_window: int = 200
+    adaptive_min_samples: int = 30
     p_inattention: float = 0.05
     burst_n: int = 3
     max_extra_drawers: int = 2
@@ -72,6 +137,22 @@ class InterruptLayer:
     def __init__(self, config: ADHDConfig) -> None:
         self._config = config
         self._registered: list[InterruptEvent] = []
+        self._effective_threshold = self._resolve_threshold()
+
+    def _resolve_threshold(self) -> float:
+        if self._config.adaptive_threshold:
+            calibrated = _calibrate_threshold(
+                percentile=self._config.adaptive_percentile,
+                window=self._config.adaptive_window,
+                min_samples=self._config.adaptive_min_samples,
+            )
+            if calibrated is not None:
+                return calibrated
+        return self._config.impulse_threshold
+
+    @property
+    def effective_threshold(self) -> float:
+        return self._effective_threshold
 
     @property
     def active(self) -> bool:
@@ -87,7 +168,7 @@ class InterruptLayer:
             return
 
         for drawer, score in seeds:
-            if score >= self._config.impulse_threshold:
+            if score >= self._effective_threshold:
                 self._registered.append(InterruptEvent("threshold", drawer, score))
 
         if mode in (ImpulsivityMode.MEDIUM, ImpulsivityMode.HIGH) and len(seeds) >= 2:

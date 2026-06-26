@@ -50,6 +50,10 @@ class ADHDDefaults:
     impulse_threshold: float = 0.88
     impulse_margin: float = 0.18
     impulse_mode: str = "prepend"
+    adaptive_threshold: bool = True
+    adaptive_percentile: float = 0.95
+    adaptive_window: int = 200
+    adaptive_min_samples: int = 30
     p_inattention: float = 0.05
     burst_n: int = 3
     max_extra_drawers: int = 2

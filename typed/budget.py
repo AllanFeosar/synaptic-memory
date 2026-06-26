@@ -64,6 +64,8 @@ class RetrievalRecord:
     result_count: int
     duration_ms: float
     results: list  # [{drawer_id, score, type, snippet}]
+    interrupt_events: list = field(default_factory=list)  # [{kind, score, drawer_id}]
+    effective_threshold: Optional[float] = None
 
 
 @dataclass
@@ -139,6 +141,8 @@ def record_retrieval(
     top_k: int,
     results: list,
     duration_ms: float,
+    interrupt_events: Optional[list] = None,
+    effective_threshold: Optional[float] = None,
     log_path: Path = DEFAULT_RETRIEVAL_LOG,
 ) -> None:
     """Append one retrieval event to retrieval-audit.jsonl. Never raises."""
@@ -150,6 +154,8 @@ def record_retrieval(
         result_count=len(results),
         duration_ms=round(duration_ms, 1),
         results=results,
+        interrupt_events=interrupt_events or [],
+        effective_threshold=effective_threshold,
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as f:
@@ -178,6 +184,12 @@ def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
     zero_result = sum(1 for r in records if r["result_count"] == 0)
     under_half = sum(1 for r in records if 0 < r["result_count"] < r["top_k"] / 2)
 
+    # Interrupt stats (new fields may not exist in older records)
+    has_interrupts = sum(1 for r in records if r.get("interrupt_events"))
+    total_interrupts = sum(len(r.get("interrupt_events", [])) for r in records)
+    thresholds = [r["effective_threshold"] for r in records if r.get("effective_threshold") is not None]
+    latest_threshold = thresholds[-1] if thresholds else None
+
     lines = [
         "retrieval audit report",
         "=" * 28,
@@ -187,13 +199,22 @@ def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
         f"Zero-result queries     : {zero_result} ({zero_result / total * 100:.1f}%)",
         f"Under-half-k queries    : {under_half} ({under_half / total * 100:.1f}%)",
         "",
+        "Interrupt layer:",
+        f"  Retrievals with interrupts : {has_interrupts}/{total} ({has_interrupts / total * 100:.1f}%)",
+        f"  Total interrupt events     : {total_interrupts}",
+        f"  Effective threshold (last) : {latest_threshold or 'n/a'}",
+        "",
         "Last 5 queries:",
     ]
     for r in records[-5:]:
+        evt_tag = ""
+        if r.get("interrupt_events"):
+            kinds = [e["kind"] for e in r["interrupt_events"]]
+            evt_tag = f"  INT:{','.join(kinds)}"
         lines.append(
             f"  [{r['ts'][:16]}] scope={r['scope'] or 'global'!r:12s} "
             f"→ {r['result_count']}/{r['top_k']} in {r['duration_ms']:.0f}ms"
-            f"  q={r['query'][:50]!r}"
+            f"  q={r['query'][:50]!r}{evt_tag}"
         )
     return "\n".join(lines)
 

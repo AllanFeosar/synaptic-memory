@@ -449,9 +449,13 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `retrieval` | `graphify_labels_per_ref` | 2 | Labels to query graphify for per extracted ref |
 | `adhd` | `enabled` | false | Master switch for ADHD behavior layer |
 | `adhd` | `level` | 0 | 0=off, 1=impulse only, 2=+drift, 3=+burst |
-| `adhd` | `impulse_threshold` | 0.88 | Score above which a seed triggers an interrupt event |
+| `adhd` | `impulse_threshold` | 0.88 | Fallback threshold when adaptive calibration has insufficient data |
 | `adhd` | `impulse_margin` | 0.18 | Top-1 vs top-2 gap to trigger margin interrupt |
 | `adhd` | `impulse_mode` | "prepend" | How interrupt hits are merged: "prepend" or "fast_path" |
+| `adhd` | `adaptive_threshold` | true | Use percentile-based threshold from retrieval audit data instead of fixed value |
+| `adhd` | `adaptive_percentile` | 0.95 | Which percentile of recent top-1 scores to use as the interrupt threshold |
+| `adhd` | `adaptive_window` | 200 | How many recent retrieval records to sample for calibration |
+| `adhd` | `adaptive_min_samples` | 30 | Minimum records needed before adaptive kicks in (falls back to fixed below this) |
 | `adhd` | `p_inattention` | 0.05 | Probability of query drift per invocation |
 | `adhd` | `burst_n` | 3 | Parallel variant queries (ParallelSearchLayer) |
 | `adhd` | `max_extra_drawers` | 2 | Max ADHD-sourced drawers added on top of base results |

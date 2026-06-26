@@ -211,6 +211,11 @@ def spreading_activation_search(
                 for d, s in top
             ],
             duration_ms=(time.perf_counter() - _t0) * 1000,
+            interrupt_events=[
+                {"kind": e.kind, "score": round(e.score, 4), "drawer_id": e.drawer.drawer_id}
+                for e in _interrupt.events
+            ],
+            effective_threshold=round(_interrupt.effective_threshold, 4),
         )
     except Exception:
         pass
