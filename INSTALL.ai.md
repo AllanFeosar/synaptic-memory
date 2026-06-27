@@ -108,12 +108,20 @@ No commands needed — proceed to Step 5.
 
 ## Step 5 — Register Claude Code hooks (global, one-time)
 
-Read `~/.claude/settings.json` first, then merge in the hooks block below (do not overwrite unrelated settings).
+Read `~/.claude/settings.json` first, then merge in the `env` and `hooks` blocks below (do not overwrite unrelated settings).
 
 Replace `<synaptic-memory-path>` with the actual path from Step 3.
 
+> **Important:** The `env` block prevents MCP server connection timeouts on large palaces.
+> `MCP_TIMEOUT` gives the mempalace MCP server enough time to complete its startup integrity check.
+> `MCP_TOOL_TIMEOUT` prevents tool calls from timing out on slow searches.
+
 ```json
 {
+  "env": {
+    "MCP_TIMEOUT": "300000",
+    "MCP_TOOL_TIMEOUT": "300000"
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -146,7 +154,7 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
     ],
     "SessionStart": [{
       "hooks": [
-        {"type": "command", "command": "python3.11 -m mempalace hook run --hook session-start --harness claude-code"},
+        {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/session_start_mempalace.py\""},
         {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/session_start.py\" --no-mempalace-passthrough"}
       ]
     }],
@@ -174,7 +182,7 @@ Hook behavior:
 - **PreToolUse / Write** — blocks writes to `.claude/memory/`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
 - **PreToolUse / Read** — before reading a file, queries graphify for that file's node + neighbors, searches mempalace for related memories, injects them as context. Silent if no graph or no memories found.
 - **PostToolUse / Edit|Write** — after editing any code file: (1) reminds Claude to save decisions to mempalace, (2) surfaces graphify structural neighbors that may also need updating
-- **SessionStart** — mempalace loads prior context; typed layer injects top-3 typed summaries (~150 tokens)
+- **SessionStart** — `session_start_mempalace.py` runs mempalace hook with a 30s timeout (prevents subprocess init timeout on large palaces); typed layer injects top-3 typed summaries (~150 tokens)
 - **Stop** — fires every ~15 messages; typed layer writes one summary drawer and records drawer count to `typed/budget.py`
 - **PreCompact** — read-only; surfaces pinned drawers into context before compaction
 
@@ -347,7 +355,8 @@ Get-ScheduledTask -TaskName "synaptic-memory-consolidate"
 
 What the cron does per project found under the scan root:
 
-1. Checks for `scripts/mempal_to_graphify.py` in that project root
+1. Verifies the directory is a git repo (`.git` directory must exist — safety check)
+2. Checks for `scripts/mempal_to_graphify.py` in that project root
 2. Runs it → injects memories into `graphify-out/graph.json`
 3. Runs `scripts/graphify_wiki.py --clean` → refreshes Obsidian wiki
 4. Any failures are written to `~/.synaptic-memory/sync-errors.log` and opened in Notepad

@@ -68,10 +68,14 @@ Download from [obsidian.md](https://obsidian.md) — free, no account needed.
 
 Add to `~/.claude/settings.json`. Replace `<synaptic-memory-path>` with where you cloned this repo.
 
-The hooks chain mempalace first, then the typed layer with `--no-mempalace-passthrough` to avoid double-firing:
+The `env` block prevents MCP server connection timeouts on large palaces. The hooks chain mempalace (with a 30s timeout wrapper) first, then the typed layer with `--no-mempalace-passthrough` to avoid double-firing:
 
 ```json
 {
+  "env": {
+    "MCP_TIMEOUT": "300000",
+    "MCP_TOOL_TIMEOUT": "300000"
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -104,7 +108,7 @@ The hooks chain mempalace first, then the typed layer with `--no-mempalace-passt
     ],
     "SessionStart": [{
       "hooks": [
-        {"type": "command", "command": "python3.11 -m mempalace hook run --hook session-start --harness claude-code"},
+        {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/session_start_mempalace.py\""},
         {"type": "command", "command": "python3.11 \"<synaptic-memory-path>/hooks/session_start.py\" --no-mempalace-passthrough"}
       ]
     }],
@@ -129,7 +133,7 @@ The hooks chain mempalace first, then the typed layer with `--no-mempalace-passt
 Hook behavior:
 
 - **PreToolUse / Glob|Grep** — before any file search, reminds Claude to check `graphify-out/GRAPH_REPORT.md` first (only fires if the graph exists)
-- **PreToolUse / Write** — blocks writes to `.claude/memory/`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
+- **PreToolUse / Write** — blocks writes to `.claude/memory/` (with graceful error handling on malformed input); redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
 - **PreToolUse / Read** — before reading a file, queries graphify for that file's node + neighbors, searches mempalace for related memories, injects them as context. Silent if no graph or no memories found.
 - **PostToolUse / Edit|Write** — after editing a code file: (1) reminds Claude to save decisions to mempalace, (2) queries graphify for structurally linked files that may also need updating, (3) surfaces related memories about those neighbors
 - **SessionStart** — mempalace loads prior context; typed layer runs spreading activation search (mempalace + graphify hops) and injects top-3 drawer summaries (~150 tokens)
@@ -233,10 +237,10 @@ What consolidation does per run:
 1. Walks all typed drawers — salience reranks and auto-pins top 5%
 2. Detects contradictions (high-similarity opposing drawer pairs)
 3. Flags stale drawers (references files modified since last run)
-4. Archives drawers that have exceeded their tier TTL (ephemeral=1d, short-term=7d, long-term=90d; permanent never archived; pinned always exempt)
-5. Discovers all projects under `SYNAPTIC_SCAN_ROOT` with a built graphify graph
+4. Archives drawers that have exceeded their tier TTL (ephemeral=1d, short-term=7d, long-term=configurable via `forget_after_days`; permanent never archived; pinned always exempt)
+5. Discovers all projects under `SYNAPTIC_SCAN_ROOT` with a built graphify graph (only executes scripts from git repos — `.git` directory must exist)
 6. Runs `mempal_to_graphify.py` + `graphify_wiki.py --clean` for each project
-7. Writes `consolidate-report.json`; opens Notepad error log on Windows if anything failed
+7. Writes `consolidate-report.json`; appends errors to `sync-errors.log`; opens Notepad on Windows if anything failed
 
 ---
 
@@ -461,6 +465,7 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `adhd` | `max_extra_drawers` | 2 | Max ADHD-sourced drawers added on top of base results |
 | `adhd` | `burst_timeout_ms` | 200 | Timeout for parallel burst searches |
 | `consolidation` | `contradiction_sim_threshold` | 0.88 | Cosine similarity above which opposing-type drawers are flagged |
+| `consolidation` | `forget_after_days` | 90 | Maximum TTL cap — overrides tier TTL if lower (e.g. set to 30 for faster archival) |
 | `consolidation` | `pin_top_fraction` | 0.05 | Top fraction of drawers auto-pinned per scope during consolidation |
 | `consolidation` | `scan_max_depth` | 6 | Directory depth limit for project discovery |
 | `write` | `dupe_threshold` | 0.92 | Cosine similarity above which a new drawer is rejected as duplicate |
@@ -492,6 +497,7 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `.mcp.json` | No (gitignored) | Your local MCP config with real paths |
 | `mempalace.project.json` | No (gitignored) | Your local per-project config |
 | `mempalace.yaml` | No (gitignored) | Your local room definitions |
+| `hooks/session_start_mempalace.py` | Yes | SessionStart hook — mempalace passthrough with 30s timeout |
 | `hooks/session_start.py` | Yes | SessionStart hook — spreading activation + graphify |
 | `hooks/stop_15msg.py` | Yes | Stop hook (every 15 messages) — write-only |
 | `hooks/pre_compact.py` | Yes | PreCompact hook — spreading activation + graphify before compaction |
@@ -617,7 +623,7 @@ A non-linear retrieval layer that adds human-like associative behavior on top of
 
 **Why:** Linear retrieval (query → top-k) misses bridging memories, cross-domain patterns, and high-value low-usage drawers. The ADHD layer surfaces what focused search buries — without replacing it.
 
-**Status:** Module 1 (InterruptLayer) shipped 2026-06-23. Modules 2 and 3 are next.
+**Status:** Module 1 (InterruptLayer) shipped 2026-06-23, bug-fixed 2026-06-27 (was not wired into `inject_session_start`). 1-week test active (2026-06-27 → 2026-07-04). Modules 2 and 3 are next.
 
 #### The three modules
 
@@ -626,11 +632,11 @@ A non-linear retrieval layer that adds human-like associative behavior on top of
 Interrupt-driven early-exit retrieval. Surfaces a strong hit immediately without waiting for full hop expansion.
 
 - Mode: disabled by default (`enabled=false`) — activate via `SYNAPTIC_ADHD_LEVEL=1` or config.json
-- Three interrupt types: `threshold` (score >= 0.88), `margin` (top-1 dominates top-2 by > 0.18), `saturation` (frontier gone cold)
+- Two interrupt types: `threshold` (score >= adaptive threshold, LOW mode), `margin` (top-1 dominates top-2 by > 0.18, MEDIUM/HIGH mode)
 - Wired into `spreading_activation_search()`: `check_seeds()` pre-hop, `post_merge()` post-ranking
 - **No phasic gain score multiplier** — inflating scores before threshold check would break all downstream callers
 - `ImpulsivityMode` enum: `OFF / LOW / MEDIUM / HIGH` — config.json controls the default, `SYNAPTIC_ADHD_LEVEL` overrides
-- 19 passing tests in `tests/test_adhd.py`
+- 25 passing tests in `tests/test_adhd.py` (19 original + 6 adaptive threshold)
 
 **2. QueryDriftLayer (Inattention) — build next**
 
