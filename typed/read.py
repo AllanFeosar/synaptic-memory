@@ -252,6 +252,7 @@ def inject_session_start(
         top_k=cfg.session_start_top_k,
         client=client,
         graphify_client=graphify_client,
+        adhd_config=ADHDConfig.from_env(),
     )
 
     if not drawers:
