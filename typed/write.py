@@ -62,7 +62,7 @@ def write_drawer(
         ValueError on missing/invalid fields.
         DuplicateDrawerError if an embedding-similar drawer exists.
     """
-    client = client or InProcessClient()
+    client = client or InProcessClient.get_or_create()
     dupe_threshold = dupe_threshold if dupe_threshold is not None else get_config().write.dupe_threshold
 
     drawer = TypedDrawer.new(

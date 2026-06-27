@@ -34,7 +34,7 @@ def mark_correction(
 
     Returns a dict[drawer_id -> new_confidence] for visibility.
     """
-    client = client or InProcessClient()
+    client = client or InProcessClient.get_or_create()
     out: dict[str, str] = {}
     for drawer_id in drawer_ids:
         hits = client.search(query=drawer_id, top_k=1)
@@ -64,7 +64,7 @@ def mark_useful(
     Use when Claude/the user explicitly wants to reinforce a drawer (e.g.,
     'this one is the canonical answer'). Returns count updated.
     """
-    client = client or InProcessClient()
+    client = client or InProcessClient.get_or_create()
     n = 0
     for drawer_id in drawer_ids:
         hits = client.search(query=drawer_id, top_k=1)

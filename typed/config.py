@@ -24,10 +24,22 @@ from typing import Optional
 CONFIG_PATH = Path.home() / ".synaptic-memory" / "config.json"
 
 
+_COERCE_TYPES = {"int": int, "float": float, "bool": bool, "str": str}
+
+
 def _merge(target: object, overrides: dict) -> None:
     for f in fields(target):  # type: ignore[arg-type]
         if f.name in overrides:
-            setattr(target, f.name, overrides[f.name])
+            val = overrides[f.name]
+            expected = getattr(target, f.name)
+            if expected is not None and not isinstance(val, type(expected)):
+                coerce = _COERCE_TYPES.get(type(expected).__name__)
+                if coerce:
+                    try:
+                        val = coerce(val)
+                    except (ValueError, TypeError):
+                        continue
+            setattr(target, f.name, val)
 
 
 @dataclass

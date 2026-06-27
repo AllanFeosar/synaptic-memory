@@ -1,7 +1,11 @@
 import sys
 import json
 
-d = json.load(sys.stdin)
+try:
+    d = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError):
+    sys.exit(0)
+
 p = d.get("tool_input", {}).get("file_path", "").replace("\\", "/")
 
 if ".claude/memory" in p:

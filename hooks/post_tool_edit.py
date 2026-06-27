@@ -36,7 +36,8 @@ from typed.graphify_client import LocalGraphifyClient  # noqa: E402
 from typed.read import spreading_activation_search     # noqa: E402
 
 
-SUMMARY_MAX_CHARS = 160
+from typed.config import get_config as _get_config
+SUMMARY_MAX_CHARS = _get_config().retrieval.summary_max_chars
 MAX_NEIGHBORS = 4
 MAX_DRAWERS = 2
 

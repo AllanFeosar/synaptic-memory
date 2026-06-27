@@ -263,7 +263,7 @@ def weekly_report(log_path: Path = DEFAULT_LOG) -> str:
     for idx in sorted(buckets.keys())[1:]:
         weeks = buckets[idx]
         avg = mean(r.total() for r in weeks)
-        change = (avg - baseline_avg) / baseline_avg
+        change = (avg - baseline_avg) / baseline_avg if baseline_avg else 0.0
         write_o = mean(r.drawers_written * 250 for r in weeks)
         read_s = mean(r.file_summary_hits * 1500 for r in weeks)
 
@@ -287,7 +287,7 @@ def weekly_report(log_path: Path = DEFAULT_LOG) -> str:
     last_idx = max(buckets)
     if last_idx >= 4:
         last_avg = mean(r.total() for r in buckets[last_idx])
-        change = (last_avg - baseline_avg) / baseline_avg
+        change = (last_avg - baseline_avg) / baseline_avg if baseline_avg else 0.0
         if -change < get_config().budget.week_4_target_drop * 0.5:
             lines.append("KILL SWITCH: <10% reduction by week 4. Simplify aggressively.")
 

@@ -58,6 +58,10 @@ class MempalaceClient(abc.ABC):
     def status(self) -> dict[str, Any]:
         ...
 
+    def get_all_drawers(self, wing: Optional[str] = None) -> list[SearchHit]:
+        """Return all drawers (no semantic ranking). Default falls back to search."""
+        return self.search(query="*", top_k=10_000, wing=wing)
+
 
 # ---------------------------------------------------------------------------
 # In-process implementation — calls mempalace Python API directly
@@ -190,6 +194,32 @@ class InProcessClient(MempalaceClient):
             return sorted(wings - {""})
         except Exception:
             return []
+
+    def get_all_drawers(self, wing: Optional[str] = None) -> list[SearchHit]:
+        try:
+            col = self._collection(create=False)
+            from mempalace.searcher import build_where_filter
+            kwargs: dict = {"include": ["documents", "metadatas"]}
+            where = build_where_filter(wing, None) if wing else None
+            if where:
+                kwargs["where"] = where
+            result = col.get(**kwargs)
+            ids = result.ids or []
+            docs = result.documents or []
+            metas = result.metadatas or []
+            hits = []
+            for doc_id, doc, meta in zip(ids, docs, metas):
+                meta = meta or {}
+                hits.append(SearchHit(
+                    drawer_id=str(doc_id),
+                    content=str(doc),
+                    score=1.0,
+                    wing=meta.get("wing"),
+                    room=meta.get("room"),
+                ))
+            return hits
+        except Exception:
+            return super().get_all_drawers(wing)
 
     def status(self) -> dict[str, Any]:
         try:

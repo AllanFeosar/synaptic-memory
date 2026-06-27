@@ -45,7 +45,14 @@ def _calibrate_threshold(
         return None
 
     try:
-        lines = log_path.read_text(encoding="utf-8").splitlines()
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            # Read last ~64 KB — enough for ~200 records at ~300 bytes each
+            chunk_size = min(size, 65_536)
+            f.seek(size - chunk_size)
+            tail = f.read().decode("utf-8", errors="replace")
+        lines = tail.splitlines()
     except OSError:
         return None
 
@@ -179,15 +186,6 @@ class InterruptLayer:
                 d, s = sorted_seeds[0]
                 if not any(e.drawer.drawer_id == d.drawer_id for e in self._registered):
                     self._registered.append(InterruptEvent("margin", d, s))
-
-    def check_frontier(self, frontier_scores: list[float]) -> None:
-        """Check for saturation interrupt (HIGH mode only). Not wired in v1."""
-        if not self.active:
-            return
-        if self._config.impulsivity_mode != ImpulsivityMode.HIGH:
-            return
-        if frontier_scores and all(s < 0.1 for s in frontier_scores):
-            pass  # saturation detected -- reserved for future use
 
     def post_merge(self, ranked: list[tuple[TypedDrawer, float]]) -> list[tuple[TypedDrawer, float]]:
         """Prepend registered interrupt hits, deduplicate against ranked results."""

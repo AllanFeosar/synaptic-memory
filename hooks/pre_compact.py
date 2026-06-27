@@ -31,7 +31,8 @@ from typed.read import spreading_activation_search     # noqa: E402
 
 
 MAX_INJECT = 5
-SUMMARY_MAX_CHARS = 180
+from typed.config import get_config as _get_config
+SUMMARY_MAX_CHARS = _get_config().retrieval.summary_max_chars
 
 
 def detect_scope() -> str:

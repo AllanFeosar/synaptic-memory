@@ -88,9 +88,13 @@ class ConsolidateReport:
 
 def _enumerate_drawers(client: MempalaceClient) -> list[tuple[str, TypedDrawer]]:
     typed: list[tuple[str, TypedDrawer]] = []
+    seen: set[str] = set()
     for wing in client.list_wings():
-        hits = client.search(query=wing, top_k=10_000, wing=wing)
+        hits = client.get_all_drawers(wing=wing)
         for hit in hits:
+            if hit.drawer_id in seen:
+                continue
+            seen.add(hit.drawer_id)
             try:
                 d = parse_drawer(hit.content)
                 typed.append((hit.drawer_id, d))
@@ -204,6 +208,9 @@ def _mark_stale_for_changed_files(
             rel = match.group(1)
             p = repo_root / rel
             try:
+                p = p.resolve()
+                if not str(p).startswith(str(repo_root.resolve())):
+                    continue
                 if p.exists() and _dt.datetime.fromtimestamp(
                     p.stat().st_mtime, _dt.timezone.utc
                 ) > last_consolidate:
@@ -244,6 +251,9 @@ def _archive_old(
         ttl = d.tier.ttl_days
         if ttl is None:
             continue  # permanent — never archive
+        configured_max = get_config().consolidation.forget_after_days
+        if configured_max and ttl > configured_max:
+            ttl = configured_max
 
         age_days = (now - d.created_at).total_seconds() / 86400.0
         if age_days < ttl:
@@ -300,8 +310,8 @@ def _read_scan_root_from_mcp(synaptic_repo: Optional[Path] = None) -> Optional[P
 # ---------------------------------------------------------------------------
 
 def _discover_projects(scan_root: Path, max_depth: Optional[int] = None) -> list[Path]:
-    max_depth = max_depth if max_depth is not None else get_config().consolidation.scan_max_depth
     """Walk scan_root and return every project root that has graphify-out/graph.json."""
+    max_depth = max_depth if max_depth is not None else get_config().consolidation.scan_max_depth
     found: list[Path] = []
 
     def walk(path: Path, depth: int) -> None:
@@ -336,6 +346,13 @@ def _sync_project_graph(
     """Run mempal_to_graphify.py + graphify_wiki.py for one discovered project."""
     bridge = project_root / "scripts" / "mempal_to_graphify.py"
     wiki   = project_root / "scripts" / "graphify_wiki.py"
+
+    # Only execute scripts from repos that also have a .git directory
+    if not (project_root / ".git").is_dir():
+        report.errors.append(
+            f"[{project_root.name}] skipped — not a git repo (no .git directory)"
+        )
+        return False
 
     if not bridge.exists():
         report.errors.append(
@@ -396,7 +413,8 @@ def _notify_errors(errors: list[str], log_path: Path) -> None:
     lines.append("")
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text("\n".join(lines), encoding="utf-8")
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
     if sys.platform == "win32":
         try:
@@ -423,7 +441,7 @@ def consolidate(
     client: Optional[MempalaceClient] = None,
 ) -> ConsolidateReport:
     """Run the full nightly consolidation. Returns a JSON-serializable report."""
-    client = client or InProcessClient()
+    client = client or InProcessClient.get_or_create()
     report = ConsolidateReport(started_at=_dt.datetime.now(_dt.timezone.utc).isoformat())
 
     # Load last-run timestamp for stale detection
@@ -432,7 +450,7 @@ def consolidate(
         try:
             prev = json.loads(report_path.read_text())
             last_consolidate = _dt.datetime.fromisoformat(prev.get("finished_at"))
-        except (ValueError, KeyError, json.JSONDecodeError):
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
             last_consolidate = None
 
     # --- mempalace health (global, runs once) ---
