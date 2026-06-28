@@ -41,18 +41,7 @@ from typed.graphify_client import LocalGraphifyClient  # noqa: E402
 from typed.read import inject_session_start            # noqa: E402
 
 
-def detect_scope() -> str:
-    """Best-effort current scope detection.
-
-    Order:
-      1. SYNAPTIC_V2_SCOPE env var (explicit override)
-      2. CLAUDE_PROJECT_SLUG env var (set by mempalace's project config)
-      3. cwd folder name
-    """
-    for env_var in ("SYNAPTIC_V2_SCOPE", "CLAUDE_PROJECT_SLUG"):
-        if v := os.environ.get(env_var):
-            return v.strip()
-    return Path.cwd().name
+from hooks._common import detect_scope  # noqa: E402
 
 
 def detect_intent() -> str:
@@ -69,7 +58,7 @@ def run_mempalace_hook(harness: str) -> str:
     """Invoke the existing mempalace hook so we don't break the current setup."""
     try:
         result = subprocess.run(
-            ["py", "-3.11", "-m", "mempalace", "hook", "run",
+            [sys.executable, "-m", "mempalace", "hook", "run",
              "--hook", "session-start", "--harness", harness],
             capture_output=True, text=True, timeout=10,
         )

@@ -98,11 +98,14 @@ class LocalGraphifyClient(GraphifyClient):
             if nid in self._nodes
         ]
 
+    _cache: dict[tuple, "LocalGraphifyClient"] = {}
+
     @classmethod
     def from_cwd(cls, hint: Optional[Path] = None) -> Optional["LocalGraphifyClient"]:
         """Try to load from cwd/graphify-out/graph.json (or hint path).
 
         Returns None if not found — spreading activation degrades gracefully.
+        Cached per (path, mtime) to avoid re-parsing within the same process.
         """
         candidates = []
         if hint:
@@ -112,7 +115,13 @@ class LocalGraphifyClient(GraphifyClient):
         for path in candidates:
             if path.exists():
                 try:
-                    return cls(path)
+                    mtime = path.stat().st_mtime
+                    key = (str(path), mtime)
+                    if key in cls._cache:
+                        return cls._cache[key]
+                    client = cls(path)
+                    cls._cache[key] = client
+                    return client
                 except (json.JSONDecodeError, KeyError, OSError):
                     return None
         return None

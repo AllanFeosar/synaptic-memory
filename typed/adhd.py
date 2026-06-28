@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from typed.types import TypedDrawer
+import logging
+logger = logging.getLogger(__name__)
 
 
 class ImpulsivityMode(str, enum.Enum):
@@ -52,6 +54,10 @@ def _calibrate_threshold(
             chunk_size = min(size, 65_536)
             f.seek(size - chunk_size)
             tail = f.read().decode("utf-8", errors="replace")
+        # Discard partial first line from mid-file seek
+        nl = tail.find("\n")
+        if nl != -1 and chunk_size < size:
+            tail = tail[nl + 1:]
         lines = tail.splitlines()
     except OSError:
         return None

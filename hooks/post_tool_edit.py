@@ -36,18 +36,19 @@ from typed.graphify_client import LocalGraphifyClient  # noqa: E402
 from typed.read import spreading_activation_search     # noqa: E402
 
 
-from typed.config import get_config as _get_config
-SUMMARY_MAX_CHARS = _get_config().retrieval.summary_max_chars
-MAX_NEIGHBORS = 4
-MAX_DRAWERS = 2
+def _summary_max_chars():
+    from typed.config import get_config
+    return get_config().retrieval.summary_max_chars
+def _max_neighbors():
+    from typed.config import get_config
+    return get_config().hooks.post_tool_edit_max_neighbors
+
+def _max_drawers():
+    from typed.config import get_config
+    return get_config().hooks.post_tool_edit_max_drawers
 
 
-def _detect_scope() -> str:
-    return (
-        os.environ.get("SYNAPTIC_V2_SCOPE")
-        or os.environ.get("CLAUDE_PROJECT_SLUG")
-        or Path.cwd().name
-    )
+from hooks._common import detect_scope as _detect_scope  # noqa: E402
 
 
 def main() -> int:
@@ -70,19 +71,19 @@ def main() -> int:
         return 0
 
     # Find structural neighbors of the edited file
-    neighbors = graphify_client.get_neighbors(stem, limit=MAX_NEIGHBORS)
+    neighbors = graphify_client.get_neighbors(stem, limit=_max_neighbors())
     if not neighbors:
         # Try querying by stem in case label differs from stem
         hits = graphify_client.query(stem, limit=1)
         if hits:
-            neighbors = graphify_client.get_neighbors(hits[0], limit=MAX_NEIGHBORS)
+            neighbors = graphify_client.get_neighbors(hits[0], limit=_max_neighbors())
 
     scope = _detect_scope()
     lines: list[str] = []
 
     # Surface graphify neighbors as "may also need updating"
     if neighbors:
-        neighbor_names = ", ".join(f"`{n}`" for n in neighbors[:MAX_NEIGHBORS])
+        neighbor_names = ", ".join(f"`{n}`" for n in neighbors[:_max_neighbors()])
         lines.append(f"Graphify: `{Path(file_path).name}` is linked to {neighbor_names} — check if they need updating.")
 
     # Surface any relevant memories via spreading activation on the edited file
@@ -90,12 +91,12 @@ def main() -> int:
         drawers = spreading_activation_search(
             query=f"{stem} {scope}",
             scope=scope,
-            top_k=MAX_DRAWERS,
+            top_k=_max_drawers(),
             depth=1,
             graphify_client=graphify_client,
         )
         for d in drawers:
-            lines.append(f"Memory: {d.summary(max_chars=SUMMARY_MAX_CHARS)}")
+            lines.append(f"Memory: {d.summary(max_chars=_summary_max_chars())}")
     except Exception:  # noqa: BLE001
         pass
 

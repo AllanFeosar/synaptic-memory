@@ -36,6 +36,9 @@ import re
 from typing import Any, Optional
 
 
+FILE_REF_RE = re.compile(r"`([^`]+\.(?:py|ts|tsx|js|jsx|go|rs|java|cs|md))`")
+
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -50,7 +53,13 @@ class DrawerType(str, enum.Enum):
 
     @classmethod
     def parse(cls, raw: str) -> "DrawerType":
-        return cls(raw.strip().lower().replace("_", "-"))
+        normalized = raw.strip().lower().replace("_", "-")
+        try:
+            return cls(normalized)
+        except ValueError:
+            import logging
+            logging.getLogger(__name__).warning("unknown drawer type %r, falling back to summary", raw)
+            return cls.SUMMARY
 
 
 class Confidence(str, enum.Enum):
@@ -203,12 +212,14 @@ class TypedDrawer:
         else:
             decay = math.exp(-math.log(2) * age_days / half_life)
 
+        from typed.config import get_config
+        sc = get_config().salience
         score = (
-            self.usage_count * 2.0
+            self.usage_count * sc.usage_weight
             + decay
-            + (5.0 if self.pinned else 0.0)
-            - self.cite_then_correct * 1.5
-            - (2.0 if self.stale else 0.0)
+            + (sc.pin_bonus if self.pinned else 0.0)
+            - self.cite_then_correct * sc.correction_penalty
+            - (sc.stale_penalty if self.stale else 0.0)
         )
         return round(score, 3)
 

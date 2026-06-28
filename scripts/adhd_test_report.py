@@ -1,15 +1,21 @@
-"""ADHD layer 1-week test monitor. Run daily: py -3.11 scripts/adhd_test_report.py"""
+"""ADHD layer test monitor. Run: py -3.11 scripts/adhd_test_report.py [--baseline-date DATE] [--baseline-records N]"""
 
+import argparse
 import json
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
 LOG = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
-BASELINE_DATE = "2026-06-27"
-BASELINE_RECORDS = 3193
+
 
 def main():
+    parser = argparse.ArgumentParser(description="ADHD layer test report")
+    parser.add_argument("--baseline-date", default="2026-06-27")
+    parser.add_argument("--baseline-records", type=int, default=3193)
+    args = parser.parse_args()
+    BASELINE_DATE = args.baseline_date
+    BASELINE_RECORDS = args.baseline_records
     records = []
     with open(LOG, "r", encoding="utf-8", errors="replace") as f:
         for line in f:

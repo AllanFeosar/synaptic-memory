@@ -3,7 +3,7 @@ import sys
 
 try:
     r = subprocess.run(
-        ["py", "-3.11", "-m", "mempalace", "hook", "run",
+        [sys.executable, "-m", "mempalace", "hook", "run",
          "--hook", "session-start", "--harness", "claude-code"],
         timeout=30,
         capture_output=True,

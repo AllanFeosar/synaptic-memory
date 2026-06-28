@@ -13,8 +13,12 @@ from __future__ import annotations
 
 from typing import Optional
 
+import logging
+
 from typed.client import InProcessClient, MempalaceClient
 from typed.config import get_config
+
+logger = logging.getLogger(__name__)
 from typed.types import (
     Confidence,
     DrawerType,

@@ -3,7 +3,7 @@
     "mempalace": {
       "type": "stdio",
       "command": "python3.11",
-      "args": ["-m", "mempalace.mcp_server", "--palace", "<storage-path>/palace"],
+      "args": ["<synaptic-memory-path>/scripts/mempalace_mcp_fast.py", "--palace", "<storage-path>/palace"],
       "env": {
         "MEMPALACE_HARNESS": "claude-code"
       }

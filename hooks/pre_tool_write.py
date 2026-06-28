@@ -6,7 +6,10 @@ try:
 except (json.JSONDecodeError, OSError):
     sys.exit(0)
 
-p = d.get("tool_input", {}).get("file_path", "").replace("\\", "/")
+tool_input = d.get("tool_input")
+if not isinstance(tool_input, dict):
+    sys.exit(0)
+p = tool_input.get("file_path", "").replace("\\", "/")
 
 if ".claude/memory" in p:
     print(json.dumps({

@@ -33,10 +33,33 @@ from statistics import mean
 from typing import Optional
 
 from typed.config import get_config
+import logging
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_LOG = Path.home() / ".synaptic-memory" / "budget.jsonl"
 DEFAULT_RETRIEVAL_LOG = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
+
+def _rotate_if_needed(log_path: Path) -> None:
+    """Rotate JSONL log file when it exceeds configured max size."""
+    bcfg = get_config().budget
+    try:
+        if not log_path.exists() or log_path.stat().st_size < bcfg.max_log_bytes:
+            return
+    except OSError:
+        return
+    for i in range(bcfg.log_keep_rotated - 1, 0, -1):
+        src = log_path.with_suffix(f".{i}.jsonl")
+        dst = log_path.with_suffix(f".{i + 1}.jsonl")
+        if src.exists():
+            try:
+                src.rename(dst)
+            except OSError:
+                pass
+    try:
+        log_path.rename(log_path.with_suffix(".1.jsonl"))
+    except OSError:
+        pass
 
 
 
@@ -119,7 +142,7 @@ def _load_records(log_path: Path) -> list[SessionRecord]:
     if not log_path.exists():
         return []
     out: list[SessionRecord] = []
-    for line in log_path.read_text().splitlines():
+    for line in open(log_path, encoding="utf-8", errors="replace"):
         if not line.strip():
             continue
         try:
@@ -158,6 +181,7 @@ def record_retrieval(
         effective_threshold=effective_threshold,
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_if_needed(log_path)
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(asdict(rec)) + "\n")
 
@@ -168,12 +192,16 @@ def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
         return "No retrieval records yet. Run sessions to populate retrieval-audit.jsonl."
 
     records: list[dict] = []
-    for line in log_path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            try:
-                records.append(json.loads(line))
-            except (ValueError, TypeError):
-                continue
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        records.append(json.loads(line))
+                    except (ValueError, TypeError):
+                        continue
+    except OSError:
+        return "Could not read retrieval audit log."
 
     if not records:
         return "No retrieval records yet."
@@ -245,12 +273,13 @@ def weekly_report(log_path: Path = DEFAULT_LOG) -> str:
     if 0 not in buckets:
         return "Need at least 1 week of baseline data."
 
+    bcfg = get_config().budget
     baseline_avg = mean(r.total() for r in buckets[0])
     write_overhead_per_session = mean(
-        r.drawers_written * 250 for r in buckets[0]  # ~250 tokens per drawer write
+        r.drawers_written * bcfg.tokens_per_drawer_write for r in buckets[0]  # ~250 tokens per drawer write
     )
     read_savings_per_session = mean(
-        r.file_summary_hits * 1500 for r in buckets[0]  # ~1500 tokens per cache hit
+        r.file_summary_hits * bcfg.tokens_per_cache_hit for r in buckets[0]  # ~1500 tokens per cache hit
     )
 
     lines = [
@@ -264,8 +293,8 @@ def weekly_report(log_path: Path = DEFAULT_LOG) -> str:
         weeks = buckets[idx]
         avg = mean(r.total() for r in weeks)
         change = (avg - baseline_avg) / baseline_avg if baseline_avg else 0.0
-        write_o = mean(r.drawers_written * 250 for r in weeks)
-        read_s = mean(r.file_summary_hits * 1500 for r in weeks)
+        write_o = mean(r.drawers_written * bcfg.tokens_per_drawer_write for r in weeks)
+        read_s = mean(r.file_summary_hits * bcfg.tokens_per_cache_hit for r in weeks)
 
         verdict = []
         bcfg = get_config().budget

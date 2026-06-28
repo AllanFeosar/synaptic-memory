@@ -30,17 +30,14 @@ from typed.graphify_client import LocalGraphifyClient  # noqa: E402
 from typed.read import spreading_activation_search     # noqa: E402
 
 
-MAX_INJECT = 5
-from typed.config import get_config as _get_config
-SUMMARY_MAX_CHARS = _get_config().retrieval.summary_max_chars
+def _max_inject():
+    from typed.config import get_config
+    return get_config().hooks.pre_compact_max_inject
+from hooks._common import detect_scope  # noqa: E402
 
-
-def detect_scope() -> str:
-    return (
-        os.environ.get("SYNAPTIC_V2_SCOPE")
-        or os.environ.get("CLAUDE_PROJECT_SLUG")
-        or Path.cwd().name
-    )
+def _get_summary_max_chars():
+    from typed.config import get_config
+    return get_config().retrieval.summary_max_chars
 
 
 def main() -> int:
@@ -53,7 +50,7 @@ def main() -> int:
         candidates = spreading_activation_search(
             query=scope,
             scope=scope,
-            top_k=MAX_INJECT * 2,
+            top_k=_max_inject() * 2,
             graphify_client=graphify_client,
         )
 
@@ -64,12 +61,12 @@ def main() -> int:
         # Fill remaining slots with highest-salience non-pinned drawers.
         pinned = [d for d in candidates if d.pinned]
         others = [d for d in candidates if not d.pinned]
-        ordered = (pinned + others)[:MAX_INJECT]
+        ordered = (pinned + others)[:_max_inject()]
 
         sys.stdout.write("<!-- typed/precompact -->\n")
         sys.stdout.write("## Pinned memory (preserved through compaction)\n")
         for d in ordered:
-            sys.stdout.write(f"- {d.summary(max_chars=SUMMARY_MAX_CHARS)}\n")
+            sys.stdout.write(f"- {d.summary(max_chars=_get_summary_max_chars())}\n")
         sys.stdout.write("<!-- /typed/precompact -->\n")
 
     except Exception as e:  # noqa: BLE001

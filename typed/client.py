@@ -17,6 +17,8 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
+import logging
+logger = logging.getLogger(__name__)
 
 
 # Process-level cache: (palace_path, collection_name) → InProcessClient.
@@ -57,6 +59,13 @@ class MempalaceClient(abc.ABC):
     @abc.abstractmethod
     def status(self) -> dict[str, Any]:
         ...
+
+    def get_drawer(self, drawer_id: str) -> Optional[SearchHit]:
+        """Fetch a single drawer by ID. Returns None if not found."""
+        hits = self.search(query=drawer_id, top_k=1)
+        if hits and hits[0].drawer_id == drawer_id:
+            return hits[0]
+        return None
 
     def get_all_drawers(self, wing: Optional[str] = None) -> list[SearchHit]:
         """Return all drawers (no semantic ranking). Default falls back to search."""
@@ -117,6 +126,7 @@ class InProcessClient(MempalaceClient):
             # Bootstrap directly, then let mempalace open it normally.
             if not create or "does not exist" not in str(exc):
                 raise
+            logger.warning("collection %r not found — bootstrapping ChromaDB at %s", self._collection_name, self._palace_path)
             import chromadb
             os.makedirs(self._palace_path, exist_ok=True)
             _chroma = chromadb.PersistentClient(path=self._palace_path)
@@ -194,6 +204,25 @@ class InProcessClient(MempalaceClient):
             return sorted(wings - {""})
         except Exception:
             return []
+
+    def get_drawer(self, drawer_id: str) -> Optional[SearchHit]:
+        try:
+            col = self._collection(create=False)
+            result = col.get(ids=[drawer_id], include=["documents", "metadatas"])
+            ids = result.ids or []
+            if not ids:
+                return None
+            doc = (result.documents or [""])[0]
+            meta = (result.metadatas or [{}])[0] or {}
+            return SearchHit(
+                drawer_id=str(ids[0]),
+                content=str(doc),
+                score=1.0,
+                wing=meta.get("wing"),
+                room=meta.get("room"),
+            )
+        except Exception:
+            return super().get_drawer(drawer_id)
 
     def get_all_drawers(self, wing: Optional[str] = None) -> list[SearchHit]:
         try:
@@ -274,6 +303,20 @@ class MockClient(MempalaceClient):
             raise KeyError(drawer_id)
         w, r, _ = self.store[drawer_id]
         self.store[drawer_id] = (w, r, content)
+
+    def get_drawer(self, drawer_id: str) -> Optional[SearchHit]:
+        """Direct ID lookup — checks both internal mock IDs and frontmatter drawer_id."""
+        # Direct store key match (mock_N IDs)
+        if drawer_id in self.store:
+            w, r, content = self.store[drawer_id]
+            return SearchHit(drawer_id=drawer_id, content=content, score=1.0, wing=w, room=r)
+        # Typed drawers embed their ID in frontmatter; scan content for a match.
+        # This mirrors InProcessClient.get_drawer() which uses ChromaDB's direct
+        # get(ids=...) — the typed drawer_id is the canonical identifier.
+        for mock_id, (w, r, content) in self.store.items():
+            if f"drawer_id: {drawer_id}" in content:
+                return SearchHit(drawer_id=mock_id, content=content, score=1.0, wing=w, room=r)
+        return None
 
     def list_wings(self) -> list[str]:
         return sorted({w for w, _, _ in self.store.values()})

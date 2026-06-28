@@ -205,14 +205,16 @@ Edit `.mcp.json`:
     "mempalace": {
       "type": "stdio",
       "command": "python3.11",
-      "args": ["-m", "mempalace.mcp_server", "--palace", "<storage-path>/palace"],
+      "args": ["<synaptic-memory-path>/scripts/mempalace_mcp_fast.py", "--palace", "<storage-path>/palace"],
       "env": {"MEMPALACE_HARNESS": "claude-code"}
     },
     "graphify": {
       "type": "stdio",
       "command": "python3.14",
       "args": ["-m", "graphify.serve", "graphify-out/graph.json"],
-      "env": {}
+      "env": {
+        "SYNAPTIC_SCAN_ROOT": "<scan-root>"
+      }
     }
   }
 }
@@ -312,12 +314,12 @@ Tell the user:
 
 ## Step 8b — Configure scan root and schedule the nightly consolidation cron
 
-**First — set the scan root in `.mcp.json`** (from Step 6), using the answer from Step 0 question 5:
+**First — replace the `<scan-root>` placeholder in `.mcp.json`** (from Step 6) with the actual path from Step 0 question 5:
 
 ```json
 "graphify": {
   "env": {
-    "SYNAPTIC_SCAN_ROOT": "<scan-root>"
+    "SYNAPTIC_SCAN_ROOT": "E:\\Projects"
   }
 }
 ```
@@ -403,4 +405,6 @@ python3.14 scripts/graphify_wiki.py --clean  # refresh Obsidian
 | graphify PreToolUse not firing | `graphify-out/graph.json` not built yet — run `/graphify` first |
 | 0 memory nodes injected | No sessions saved yet; complete a session so hooks fire |
 | Obsidian shows no graph | Open `<project-root>/graphify-out/` not the synaptic-memory repo root |
+| MCP "mempalace" connection timed out | Use `scripts/mempalace_mcp_fast.py` in `.mcp.json` (not `mempalace.mcp_server`). Add `"env": {"MCP_TIMEOUT": "300000", "MCP_TOOL_TIMEOUT": "300000"}` to `~/.claude/settings.json`. |
+| Subprocess init 60000ms timeout | Ensure SessionStart uses `session_start_mempalace.py` (30s timeout). Use `mempalace_mcp_fast.py` for MCP. |
 | Palace HNSW diverged | `python3.11 -m mempalace repair --yes` |

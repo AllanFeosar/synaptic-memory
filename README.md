@@ -156,7 +156,7 @@ Then edit `.mcp.json`:
     "mempalace": {
       "type": "stdio",
       "command": "python3.11",
-      "args": ["-m", "mempalace.mcp_server", "--palace", "/path/to/your/memory/palace"],
+      "args": ["<synaptic-memory-path>/scripts/mempalace_mcp_fast.py", "--palace", "/path/to/your/memory/palace"],
       "env": {"MEMPALACE_HARNESS": "claude-code"}
     },
     "graphify": {
@@ -468,11 +468,26 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `consolidation` | `forget_after_days` | 90 | Maximum TTL cap — overrides tier TTL if lower (e.g. set to 30 for faster archival) |
 | `consolidation` | `pin_top_fraction` | 0.05 | Top fraction of drawers auto-pinned per scope during consolidation |
 | `consolidation` | `scan_max_depth` | 6 | Directory depth limit for project discovery |
+| `consolidation` | `scan_skip_dirs` | `[]` | Extra directory names to skip during project discovery (merged with built-in list) |
 | `write` | `dupe_threshold` | 0.92 | Cosine similarity above which a new drawer is rejected as duplicate |
 | `telemetry` | `auto_demote_threshold` | 2 | cite_then_correct hits before a drawer is auto-demoted to confidence=low |
 | `budget` | `week_4_target_drop` | 0.20 | Required token reduction by week 4 (20%) |
 | `budget` | `week_8_target_drop` | 0.30 | Required token reduction by week 8 (30%) |
 | `budget` | `write_overhead_budget_fraction` | 0.30 | Max fraction of read savings that drawer writes may cost |
+| `budget` | `tokens_per_drawer_write` | 250 | Estimated tokens consumed by a single drawer write (used in budget tracking) |
+| `budget` | `tokens_per_cache_hit` | 1500 | Estimated tokens saved by an InProcessClient cache hit vs. cold load |
+| `budget` | `max_log_bytes` | 10485760 | Budget log size before rotation (bytes; default 10 MB) |
+| `budget` | `log_keep_rotated` | 3 | Number of rotated budget log files to retain |
+| `salience` | `usage_weight` | 2.0 | Weight applied to usage count in salience scoring |
+| `salience` | `pin_bonus` | 5.0 | Additive bonus for pinned drawers in salience scoring |
+| `salience` | `correction_penalty` | 1.5 | Penalty subtracted per correction event from salience score |
+| `salience` | `stale_penalty` | 2.0 | Penalty subtracted when a drawer references a file modified since last consolidation |
+| `salience` | `blend_ratio` | 0.3 | Blend weight for salience vs. semantic score in final result ranking (0=pure semantic, 1=pure salience) |
+| `hooks` | `pre_compact_max_inject` | 5 | Max drawers injected by the PreCompact hook |
+| `hooks` | `pre_tool_read_max_drawers` | 3 | Max drawers surfaced by the PreToolUse/Read hook |
+| `hooks` | `post_tool_edit_max_neighbors` | 4 | Max graphify neighbor files queried by the PostToolUse/Edit hook |
+| `hooks` | `post_tool_edit_max_drawers` | 2 | Max drawers surfaced per neighbor by the PostToolUse/Edit hook |
+| `hooks` | `max_code_refs_per_drawer` | 5 | Max code references extracted from a drawer body for graphify queries |
 
 **Env var overrides** (take precedence over config.json):
 
@@ -497,6 +512,7 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `.mcp.json` | No (gitignored) | Your local MCP config with real paths |
 | `mempalace.project.json` | No (gitignored) | Your local per-project config |
 | `mempalace.yaml` | No (gitignored) | Your local room definitions |
+| `hooks/_common.py` | Yes | Shared utilities — `detect_scope()` used by all hooks |
 | `hooks/session_start_mempalace.py` | Yes | SessionStart hook — mempalace passthrough with 30s timeout |
 | `hooks/session_start.py` | Yes | SessionStart hook — spreading activation + graphify |
 | `hooks/stop_15msg.py` | Yes | Stop hook (every 15 messages) — write-only |
@@ -504,11 +520,14 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `hooks/pre_tool_write.py` | Yes | PreToolUse/Write hook — blocks writes to `.claude/memory/`, redirects to mempalace |
 | `hooks/pre_tool_read.py` | Yes | PreToolUse/Read hook — file-targeted memory injection |
 | `hooks/post_tool_edit.py` | Yes | PostToolUse/Edit hook — graphify neighbor surfacing after edits |
+| `scripts/mempalace_mcp_fast.py` | Yes | Fast-start MCP wrapper — skips blocking PRAGMA quick_check at startup |
+| `scripts/adhd_test_report.py` | Yes | ADHD 1-week test monitoring — daily interrupt event report |
 | `scripts/mempal_to_graphify.py` | Yes | Bridge: mine ChromaDB → inject into graphify |
 | `scripts/graphify_wiki.py` | Yes | Obsidian wiki generator |
 | `typed/config.py` | Yes | Central config loader — reads `~/.synaptic-memory/config.json`, all tunables |
 | `typed/adhd.py` | Yes | ADHD behavior layer — `ADHDConfig`, `ImpulsivityMode`, `InterruptLayer` |
-| `typed/` | Yes | Typed memory package (types, write, read, consolidate, telemetry, budget, config, adhd) |
+| `typed/health.py` | Yes | Health check — palace, config, consolidation recency, retrieval audit, hooks. Run: `py -3.11 -m typed.health` |
+| `typed/` | Yes | Full typed memory package: types, write, read, consolidate, telemetry, budget, config, adhd, health, client, graphify_client |
 | `tests/` | Yes | Unit tests |
 | `graphify-out/` | No (gitignored) | Auto-generated graph + Obsidian vault |
 
@@ -530,6 +549,8 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | graphify PreToolUse not firing | Ensure `graphify-out/graph.json` exists (run `/graphify` first) |
 | 0 memory nodes in graphify | Complete a session so hooks fire, then run `mempal_to_graphify.py` |
 | Obsidian shows no graph | Open `<project>/graphify-out/` not the synaptic-memory repo root |
+| MCP server "mempalace" connection timed out | Use `scripts/mempalace_mcp_fast.py` as the MCP command (skips blocking PRAGMA quick_check). Set `MCP_TIMEOUT=300000` and `MCP_TOOL_TIMEOUT=300000` in `~/.claude/settings.json` `env` section. |
+| Subprocess initialization 60000ms timeout | Ensure SessionStart hook uses `session_start_mempalace.py` (30s timeout wrapper). Check that `.mcp.json` uses `mempalace_mcp_fast.py`, not `mempalace.mcp_server` directly. |
 | Palace HNSW diverged | Run `python3.11 -m mempalace repair --yes` |
 | Consolidation task missing | Re-run the `Register-ScheduledTask` PowerShell block in Step 7 |
 | `consolidate-report.json` empty | Task ran but mempalace has no typed drawers yet — complete sessions first |
@@ -636,7 +657,7 @@ Interrupt-driven early-exit retrieval. Surfaces a strong hit immediately without
 - Wired into `spreading_activation_search()`: `check_seeds()` pre-hop, `post_merge()` post-ranking
 - **No phasic gain score multiplier** — inflating scores before threshold check would break all downstream callers
 - `ImpulsivityMode` enum: `OFF / LOW / MEDIUM / HIGH` — config.json controls the default, `SYNAPTIC_ADHD_LEVEL` overrides
-- 25 passing tests in `tests/test_adhd.py` (19 original + 6 adaptive threshold)
+- 142 total tests across 5 test files (typed, ADHD, hooks, consolidation, telemetry, budget)
 
 **2. QueryDriftLayer (Inattention) — build next**
 

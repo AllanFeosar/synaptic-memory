@@ -27,8 +27,11 @@ Three entry points:
 
 from __future__ import annotations
 
+import logging
 import re
 import time
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -41,7 +44,7 @@ if TYPE_CHECKING:
     from typed.graphify_client import GraphifyClient
 
 # Regex for file references in drawer bodies, e.g. `auth.py`, `jwt.ts`
-_FILE_REF_RE = re.compile(r"`([^`]+\.(?:py|ts|tsx|js|jsx|go|rs|java|cs|md))`")
+from typed.types import FILE_REF_RE as _FILE_REF_RE
 # CamelCase multi-word identifiers, e.g. JwtRefreshToken, AuthService
 _CAMEL_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b")
 
@@ -70,7 +73,7 @@ def _extract_code_refs(body: str) -> list[str]:
         if r not in seen:
             seen.add(r)
             deduped.append(r)
-    return deduped[:5]
+    return deduped[:get_config().hooks.max_code_refs_per_drawer]
 
 
 def search_typed(
@@ -100,6 +103,22 @@ def search_typed(
 
     drawers.sort(key=lambda d: -d.salience())
     return drawers[:top_k]
+
+
+def _expand_graphify(seed_drawer, decay, cfg, graphify_client, _search, activation, next_frontier):
+    """Expand via graphify structural edges — extracted to reduce nesting depth."""
+    code_refs = _extract_code_refs(seed_drawer.body)
+    for ref in code_refs[:cfg.graphify_refs_per_hop]:
+        g_labels = graphify_client.query(ref, limit=cfg.graphify_labels_per_ref)
+        for label in g_labels:
+            g_hits = _search(label, 2)
+            for hit in g_hits:
+                d = _hit_to_drawer(hit)
+                if d is None or d.drawer_id in activation:
+                    continue
+                score = hit.score * decay * cfg.graphify_hop_discount
+                activation[d.drawer_id] = (d, score)
+                next_frontier.append((d, score))
 
 
 def spreading_activation_search(
@@ -170,27 +189,18 @@ def spreading_activation_search(
                 next_frontier.append((d, score))
 
             if graphify_client is not None:
-                code_refs = _extract_code_refs(seed_drawer.body)
-                for ref in code_refs[:cfg.graphify_refs_per_hop]:
-                    g_labels = graphify_client.query(ref, limit=cfg.graphify_labels_per_ref)
-                    for label in g_labels:
-                        g_hits = _search(label, 2)
-                        for hit in g_hits:
-                            d = _hit_to_drawer(hit)
-                            if d is None or d.drawer_id in activation:
-                                continue
-                            score = hit.score * decay * cfg.graphify_hop_discount
-                            activation[d.drawer_id] = (d, score)
-                            next_frontier.append((d, score))
+                _expand_graphify(seed_drawer, decay, cfg, graphify_client,
+                                _search, activation, next_frontier)
 
         frontier = next_frontier
         if not frontier or search_calls[0] >= cfg.max_search_calls:
             break
 
     # Rank by activation * salience — rewards both relatedness and importance
+    blend = get_config().salience.blend_ratio
     ranked = sorted(
         activation.values(),
-        key=lambda kv: -(kv[1] + kv[0].salience() * 0.3),
+        key=lambda kv: -(kv[1] + kv[0].salience() * blend),
     )
     ranked = _interrupt.post_merge(ranked)
     top = ranked[:top_k]
@@ -218,7 +228,7 @@ def spreading_activation_search(
             effective_threshold=round(_interrupt.effective_threshold, 4),
         )
     except Exception:
-        pass
+        logger.debug("retrieval audit record failed", exc_info=True)
 
     return [d for d, _ in top]
 
@@ -276,11 +286,11 @@ def expand_drawer(
 ) -> Optional[TypedDrawer]:
     """Fetch full drawer by id. Increments usage_count for trust calibration."""
     client = client or InProcessClient.get_or_create()
-    hits = client.search(query=drawer_id, top_k=1)
-    if not hits:
+    hit = client.get_drawer(drawer_id)
+    if not hit:
         return None
-    drawer = _hit_to_drawer(hits[0])
-    if drawer is None or drawer.drawer_id != drawer_id:
+    drawer = _hit_to_drawer(hit)
+    if drawer is None:
         return None
 
     if bump_usage:

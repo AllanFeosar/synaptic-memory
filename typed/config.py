@@ -26,6 +26,25 @@ CONFIG_PATH = Path.home() / ".synaptic-memory" / "config.json"
 
 _COERCE_TYPES = {"int": int, "float": float, "bool": bool, "str": str}
 
+_RANGE_RULES: dict[str, tuple[float, float]] = {
+    "dupe_threshold": (0.01, 1.0),
+    "pin_top_fraction": (0.001, 1.0),
+    "hop_depth": (0, 10),
+    "max_search_calls": (1, 100),
+    "forget_after_days": (1, 3650),
+    "session_start_top_k": (1, 50),
+    "frontier_fanout": (1, 20),
+    "adaptive_window": (10, 10000),
+    "adaptive_min_samples": (1, 10000),
+    "adaptive_percentile": (0.5, 1.0),
+    "auto_demote_threshold": (1, 100),
+    "week_4_target_drop": (0.01, 1.0),
+    "week_8_target_drop": (0.01, 1.0),
+}
+
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
 
 def _merge(target: object, overrides: dict) -> None:
     for f in fields(target):  # type: ignore[arg-type]
@@ -38,8 +57,35 @@ def _merge(target: object, overrides: dict) -> None:
                     try:
                         val = coerce(val)
                     except (ValueError, TypeError):
+                        _log.warning("config: cannot coerce %s=%r to %s", f.name, val, type(expected).__name__)
                         continue
+            if f.name in _RANGE_RULES:
+                lo, hi = _RANGE_RULES[f.name]
+                try:
+                    if not (lo <= float(val) <= hi):
+                        _log.warning("config: %s=%r out of range [%s, %s], using default", f.name, val, lo, hi)
+                        continue
+                except (TypeError, ValueError):
+                    continue
             setattr(target, f.name, val)
+
+
+@dataclass
+class SalienceConfig:
+    usage_weight: float = 2.0
+    pin_bonus: float = 5.0
+    correction_penalty: float = 1.5
+    stale_penalty: float = 2.0
+    blend_ratio: float = 0.3
+
+
+@dataclass
+class HooksConfig:
+    pre_compact_max_inject: int = 5
+    pre_tool_read_max_drawers: int = 3
+    post_tool_edit_max_neighbors: int = 4
+    post_tool_edit_max_drawers: int = 2
+    max_code_refs_per_drawer: int = 5
 
 
 @dataclass
@@ -78,6 +124,7 @@ class ConsolidationConfig:
     contradiction_sim_threshold: float = 0.88
     pin_top_fraction: float = 0.05
     scan_max_depth: int = 6
+    scan_skip_dirs: list = field(default_factory=list)
 
 
 @dataclass
@@ -95,6 +142,10 @@ class BudgetConfig:
     week_4_target_drop: float = 0.20
     week_8_target_drop: float = 0.30
     write_overhead_budget_fraction: float = 0.30
+    tokens_per_drawer_write: int = 250
+    tokens_per_cache_hit: int = 1500
+    max_log_bytes: int = 10485760
+    log_keep_rotated: int = 3
 
 
 @dataclass
@@ -105,6 +156,8 @@ class SynapticConfig:
     write: WriteConfig = field(default_factory=WriteConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    salience: SalienceConfig = field(default_factory=SalienceConfig)
+    hooks: HooksConfig = field(default_factory=HooksConfig)
 
 
 _cached: Optional[SynapticConfig] = None
@@ -118,7 +171,7 @@ def get_config(path: Path = CONFIG_PATH) -> SynapticConfig:
     if path.exists():
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            for section in ("retrieval", "adhd", "consolidation", "write", "telemetry", "budget"):
+            for section in ("retrieval", "adhd", "consolidation", "write", "telemetry", "budget", "salience", "hooks"):
                 if section in raw and isinstance(raw[section], dict):
                     _merge(getattr(cfg, section), raw[section])
         except (json.JSONDecodeError, OSError):

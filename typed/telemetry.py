@@ -23,6 +23,8 @@ from typing import Iterable, Optional
 from typed.client import InProcessClient, MempalaceClient
 from typed.config import get_config
 from typed.types import Confidence, parse_drawer, serialize_drawer
+import logging
+logger = logging.getLogger(__name__)
 
 
 def mark_correction(
@@ -37,19 +39,17 @@ def mark_correction(
     client = client or InProcessClient.get_or_create()
     out: dict[str, str] = {}
     for drawer_id in drawer_ids:
-        hits = client.search(query=drawer_id, top_k=1)
-        if not hits:
+        hit = client.get_drawer(drawer_id)
+        if not hit:
             continue
         try:
-            d = parse_drawer(hits[0].content)
+            d = parse_drawer(hit.content)
         except ValueError:
-            continue
-        if d.drawer_id != drawer_id:
             continue
         d.cite_then_correct += 1
         if d.cite_then_correct >= get_config().telemetry.auto_demote_threshold and d.confidence != Confidence.LOW:
             d.confidence = Confidence.LOW
-        client.update_drawer(hits[0].drawer_id, serialize_drawer(d))
+        client.update_drawer(hit.drawer_id, serialize_drawer(d))
         out[drawer_id] = d.confidence.value
     return out
 
@@ -67,17 +67,15 @@ def mark_useful(
     client = client or InProcessClient.get_or_create()
     n = 0
     for drawer_id in drawer_ids:
-        hits = client.search(query=drawer_id, top_k=1)
-        if not hits:
+        hit = client.get_drawer(drawer_id)
+        if not hit:
             continue
         try:
-            d = parse_drawer(hits[0].content)
+            d = parse_drawer(hit.content)
         except ValueError:
             continue
-        if d.drawer_id != drawer_id:
-            continue
         d.usage_count += 1
-        client.update_drawer(hits[0].drawer_id, serialize_drawer(d))
+        client.update_drawer(hit.drawer_id, serialize_drawer(d))
         n += 1
     return n
 

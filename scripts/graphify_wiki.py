@@ -68,7 +68,7 @@ def build_adjacency(nodes: dict, links: list) -> tuple[dict, dict]:
 
 
 # ── Generate one .md file for a node ─────────────────────────────────────────
-def node_to_md(node: dict, outgoing: list, incoming: list) -> str:
+def node_to_md(node: dict, outgoing: list, incoming: list, nodes_lookup: dict = None) -> str:
     label       = node.get("label", node["id"])
     community   = node.get("community", "")
     file_type   = node.get("file_type", "")
@@ -90,17 +90,18 @@ def node_to_md(node: dict, outgoing: list, incoming: list) -> str:
     lines.append(f"# {label}")
     lines.append("")
 
+    _nodes = nodes_lookup if nodes_lookup is not None else nodes_ref
     if outgoing:
         lines.append("## Links To")
         for rel, tgt_id in outgoing[:30]:
-            tgt_label = nodes_ref.get(tgt_id, {}).get("label", tgt_id)
+            tgt_label = _nodes.get(tgt_id, {}).get("label", tgt_id)
             lines.append(f"- {rel}: [[{safe_name(tgt_label)}]]")
         lines.append("")
 
     if incoming:
         lines.append("## Linked From")
         for rel, src_id in incoming[:30]:
-            src_label = nodes_ref.get(src_id, {}).get("label", src_id)
+            src_label = _nodes.get(src_id, {}).get("label", src_id)
             lines.append(f"- {rel}: [[{safe_name(src_label)}]]")
         lines.append("")
 
@@ -121,8 +122,11 @@ def generate_wiki(clean: bool = False) -> int:
     outgoing, incoming = build_adjacency(nodes, links)
 
     if clean and WIKI_DIR.exists():
-        shutil.rmtree(WIKI_DIR)
-        print("[graphify_wiki] Cleared existing wiki/")
+        if WIKI_DIR.is_symlink():
+            print("[graphify_wiki] WARN: wiki/ is a symlink — refusing to rmtree")
+        else:
+            shutil.rmtree(WIKI_DIR)
+            print("[graphify_wiki] Cleared existing wiki/")
 
     WIKI_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -131,7 +135,7 @@ def generate_wiki(clean: bool = False) -> int:
         label    = node.get("label", nid)
         fname    = safe_name(label) + ".md"
         fpath    = WIKI_DIR / fname
-        content  = node_to_md(node, outgoing.get(nid, []), incoming.get(nid, []))
+        content  = node_to_md(node, outgoing.get(nid, []), incoming.get(nid, []), nodes_lookup=nodes)
 
         fpath.write_text(content, encoding="utf-8")
         written += 1

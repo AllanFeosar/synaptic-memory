@@ -24,18 +24,13 @@ from typed.budget import record_session  # noqa: E402
 from typed.write import write_session_summary  # noqa: E402
 
 
-def detect_scope() -> str:
-    return (
-        os.environ.get("SYNAPTIC_V2_SCOPE")
-        or os.environ.get("CLAUDE_PROJECT_SLUG")
-        or Path.cwd().name
-    )
+from hooks._common import detect_scope  # noqa: E402
 
 
 def passthrough_mempalace() -> None:
     try:
         subprocess.run(
-            ["py", "-3.11", "-m", "mempalace", "hook", "run",
+            [sys.executable, "-m", "mempalace", "hook", "run",
              "--hook", "stop", "--harness", "claude-code"],
             timeout=10, check=False,
         )

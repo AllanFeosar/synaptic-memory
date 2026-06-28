@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
+
+logger = logging.getLogger(__name__)
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -47,15 +50,20 @@ DEFAULT_REPORT_PATH = Path.home() / ".synaptic-memory" / "consolidate-report.jso
 DEFAULT_ERROR_LOG   = Path.home() / ".synaptic-memory" / "sync-errors.log"
 
 # Directories to skip when scanning for projects
-_SKIP_DIRS = {
+_BUILTIN_SKIP_DIRS = {
     "node_modules", ".git", "__pycache__", "venv", ".venv", "env",
     "dist", "build", ".tox", "graphify-out", ".claude", "site-packages",
 }
 if sys.platform == "win32":
-    _SKIP_DIRS |= {
+    _BUILTIN_SKIP_DIRS |= {
         "Windows", "Program Files", "Program Files (x86)", "$Recycle.Bin",
         "System Volume Information", "ProgramData", "Recovery",
     }
+
+
+def _get_skip_dirs() -> set:
+    extra = get_config().consolidation.scan_skip_dirs
+    return _BUILTIN_SKIP_DIRS | set(extra) if extra else _BUILTIN_SKIP_DIRS
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +85,7 @@ class ConsolidateReport:
     projects_synced: list[str] = field(default_factory=list)
     projects_failed: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    partial: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, default=str)
@@ -89,17 +98,16 @@ class ConsolidateReport:
 def _enumerate_drawers(client: MempalaceClient) -> list[tuple[str, TypedDrawer]]:
     typed: list[tuple[str, TypedDrawer]] = []
     seen: set[str] = set()
-    for wing in client.list_wings():
-        hits = client.get_all_drawers(wing=wing)
-        for hit in hits:
-            if hit.drawer_id in seen:
-                continue
-            seen.add(hit.drawer_id)
-            try:
-                d = parse_drawer(hit.content)
-                typed.append((hit.drawer_id, d))
-            except ValueError:
-                continue
+    hits = client.get_all_drawers()
+    for hit in hits:
+        if hit.drawer_id in seen:
+            continue
+        seen.add(hit.drawer_id)
+        try:
+            d = parse_drawer(hit.content)
+            typed.append((hit.drawer_id, d))
+        except ValueError:
+            continue
     return typed
 
 
@@ -147,7 +155,10 @@ def _detect_contradictions(
     by_id = {d.drawer_id: (mid, d) for mid, d in items}
     seen_pairs: set[frozenset[str]] = set()
 
+    _CONTRADICTION_TYPES = {DrawerType.DECISION, DrawerType.PATTERN, DrawerType.ANTI_PATTERN}
     for mid, d in items:
+        if d.type not in _CONTRADICTION_TYPES:
+            continue
         hits = client.search(query=d.body, top_k=5, wing=d.scope)
         for hit in hits:
             if hit.drawer_id == mid:
@@ -189,7 +200,7 @@ def _detect_contradictions(
 # Stale detection
 # ---------------------------------------------------------------------------
 
-_FILE_REF_RE = re.compile(r"`([^`]+\.(?:py|ts|tsx|js|jsx|go|rs|java|md))`")
+from typed.types import FILE_REF_RE as _FILE_REF_RE
 
 
 def _mark_stale_for_changed_files(
@@ -312,16 +323,17 @@ def _read_scan_root_from_mcp(synaptic_repo: Optional[Path] = None) -> Optional[P
 def _discover_projects(scan_root: Path, max_depth: Optional[int] = None) -> list[Path]:
     """Walk scan_root and return every project root that has graphify-out/graph.json."""
     max_depth = max_depth if max_depth is not None else get_config().consolidation.scan_max_depth
+    skip_dirs = _get_skip_dirs()
     found: list[Path] = []
 
     def walk(path: Path, depth: int) -> None:
         if depth > max_depth:
             return
         try:
-            for child in sorted(path.iterdir()):
+            for child in path.iterdir():
                 if not child.is_dir():
                     continue
-                if child.name in _SKIP_DIRS or child.name.startswith((".", "$")):
+                if child.name in skip_dirs or child.name.startswith((".", "$")):
                     continue
                 if (child / "graphify-out" / "graph.json").exists():
                     found.append(child)
@@ -364,7 +376,7 @@ def _sync_project_graph(
     # Run bridge script
     try:
         result = subprocess.run(
-            ["py", "-3.11", str(bridge)],
+            [sys.executable, str(bridge)],
             capture_output=True, text=True, timeout=300,
             cwd=str(project_root),
         )
@@ -384,7 +396,7 @@ def _sync_project_graph(
     if wiki.exists():
         try:
             subprocess.run(
-                ["py", "-3.14", str(wiki), "--clean"],
+                [sys.executable, str(wiki), "--clean"],
                 capture_output=True, text=True, timeout=120,
                 cwd=str(project_root),
             )
@@ -420,12 +432,7 @@ def _notify_errors(errors: list[str], log_path: Path) -> None:
         try:
             subprocess.Popen(["notepad", str(log_path)])
         except FileNotFoundError:
-            # Notepad not found — try cmd popup as fallback
-            try:
-                msg = f"synaptic-memory: {len(errors)} sync error(s). See {log_path}"
-                subprocess.Popen(["cmd", "/c", f"echo {msg} & pause"], creationflags=0x00000010)
-            except Exception:  # noqa: BLE001
-                pass
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +451,15 @@ def consolidate(
     client = client or InProcessClient.get_or_create()
     report = ConsolidateReport(started_at=_dt.datetime.now(_dt.timezone.utc).isoformat())
 
+    # Backup consolidation report before mutations
+    if report_path.exists():
+        backup = report_path.with_suffix(".prev.json")
+        try:
+            import shutil
+            shutil.copy2(report_path, backup)
+        except OSError:
+            logger.debug("could not backup previous consolidation report")
+
     # Load last-run timestamp for stale detection
     last_consolidate: Optional[_dt.datetime] = None
     if report_path.exists():
@@ -454,25 +470,29 @@ def consolidate(
             last_consolidate = None
 
     # --- mempalace health (global, runs once) ---
-    items = _enumerate_drawers(client)
-    report.drawers_scanned = len(items)
-    report.drawers_typed = len(items)
+    try:
+        items = _enumerate_drawers(client)
+        report.drawers_scanned = len(items)
+        report.drawers_typed = len(items)
 
-    _rerank_and_pin(items, client, report)
-    _detect_contradictions(items, client, report)
-    _mark_stale_for_changed_files(items, repo_root, last_consolidate, client, report)
-    _archive_old(items, client, report)
+        _rerank_and_pin(items, client, report)
+        _detect_contradictions(items, client, report)
+        _mark_stale_for_changed_files(items, repo_root, last_consolidate, client, report)
+        _archive_old(items, client, report)
 
-    # --- per-project graphify sync ---
-    if scan_root and scan_root.exists():
-        projects = _discover_projects(scan_root)
-        report.projects_discovered = [str(p) for p in projects]
-        for proj in projects:
-            _sync_project_graph(proj, report)
-    else:
-        # Fallback: sync the synaptic-memory repo itself (old behavior)
-        if synaptic_repo and (synaptic_repo / "scripts" / "mempal_to_graphify.py").exists():
-            _sync_project_graph(synaptic_repo, report)
+        # --- per-project graphify sync ---
+        if scan_root and scan_root.exists():
+            projects = _discover_projects(scan_root)
+            report.projects_discovered = [str(p) for p in projects]
+            for proj in projects:
+                _sync_project_graph(proj, report)
+        else:
+            if synaptic_repo and (synaptic_repo / "scripts" / "mempal_to_graphify.py").exists():
+                _sync_project_graph(synaptic_repo, report)
+    except Exception as exc:
+        logger.exception("consolidation failed mid-run")
+        report.errors.append(f"consolidation aborted: {type(exc).__name__}: {exc}")
+        report.partial = True
 
     report.finished_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
 
