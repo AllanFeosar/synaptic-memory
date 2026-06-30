@@ -30,6 +30,7 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 # Best-effort: when called as a hook, sys.path may not include the repo root.
@@ -37,6 +38,7 @@ _HERE = Path(__file__).resolve()
 _REPO_ROOT = _HERE.parents[1]  # hooks/session_start.py -> repo
 sys.path.insert(0, str(_REPO_ROOT))
 
+from typed.config import get_config                    # noqa: E402
 from typed.graphify_client import LocalGraphifyClient  # noqa: E402
 from typed.read import inject_session_start            # noqa: E402
 
@@ -84,23 +86,41 @@ def main() -> int:
             if not passthrough.endswith("\n"):
                 sys.stdout.write("\n")
 
-    # 2. Auto-detect graphify graph for this project (zero config).
-    #    Looks for graphify-out/graph.json in cwd. Returns None if absent —
-    #    spreading activation degrades gracefully to mempalace-only.
-    graphify_client = LocalGraphifyClient.from_cwd()
+    # 2+3. Auto-detect graphify graph, then add v2 typed-drawer summaries
+    # (mempalace + graphify hops if available). Both run on a worker thread
+    # with a hard wall-clock budget: cold ONNX embedder / HNSW segment loads
+    # can take 30s+ on a spinning disk, and this hook runs concurrently with
+    # the MCP server's own cold-start import of the same palace — without a
+    # cap, contention between the two can block session start past Claude
+    # Code's 60s subprocess-init timeout and kill the whole session.
+    result: dict = {}
 
-    # 3. Add v2 typed-drawer summaries (mempalace + graphify hops if available).
-    try:
-        block = inject_session_start(
-            scope=scope,
-            intent_hint=intent,
-            graphify_client=graphify_client,
+    def _worker() -> None:
+        try:
+            graphify_client = LocalGraphifyClient.from_cwd()
+            result["block"] = inject_session_start(
+                scope=scope,
+                intent_hint=intent,
+                graphify_client=graphify_client,
+            )
+        except Exception as e:  # noqa: BLE001 - hooks must never crash the session
+            result["error"] = str(e)
+
+    budget = get_config().hooks.session_start_timeout_seconds
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(timeout=budget)
+
+    if t.is_alive():
+        sys.stderr.write(
+            f"[typed] inject_session_start exceeded {budget}s budget — "
+            "skipping memory injection for this session\n"
         )
-        if block:
-            sys.stdout.write(block)
-            sys.stdout.write("\n")
-    except Exception as e:  # noqa: BLE001 - hooks must never crash the session
-        sys.stderr.write(f"[typed] inject_session_start failed: {e}\n")
+    elif "error" in result:
+        sys.stderr.write(f"[typed] inject_session_start failed: {result['error']}\n")
+    elif result.get("block"):
+        sys.stdout.write(result["block"])
+        sys.stdout.write("\n")
 
     return 0
 

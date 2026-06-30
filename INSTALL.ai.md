@@ -182,7 +182,7 @@ Hook behavior:
 - **PreToolUse / Write** — blocks writes to `.claude/memory/`; redirects Claude to use `mcp__mempalace__mempalace_add_drawer` instead
 - **PreToolUse / Read** — before reading a file, queries graphify for that file's node + neighbors, searches mempalace for related memories, injects them as context. Silent if no graph or no memories found.
 - **PostToolUse / Edit|Write** — after editing any code file: (1) reminds Claude to save decisions to mempalace, (2) surfaces graphify structural neighbors that may also need updating
-- **SessionStart** — `session_start_mempalace.py` runs mempalace hook with a 30s timeout (prevents subprocess init timeout on large palaces); typed layer injects top-3 typed summaries (~150 tokens)
+- **SessionStart** — `session_start_mempalace.py` runs mempalace hook with a 30s timeout; `session_start.py` injects top-3 typed summaries (~150 tokens) via spreading activation, run on a worker thread bounded by `hooks.session_start_timeout_seconds` (default 12s) — both protect the session from cold-start palace I/O blocking past Claude Code's 60s subprocess-init timeout
 - **Stop** — fires every ~15 messages; typed layer writes one summary drawer and records drawer count to `typed/budget.py`
 - **PreCompact** — read-only; surfaces pinned drawers into context before compaction
 
@@ -405,6 +405,6 @@ python3.14 scripts/graphify_wiki.py --clean  # refresh Obsidian
 | graphify PreToolUse not firing | `graphify-out/graph.json` not built yet — run `/graphify` first |
 | 0 memory nodes injected | No sessions saved yet; complete a session so hooks fire |
 | Obsidian shows no graph | Open `<project-root>/graphify-out/` not the synaptic-memory repo root |
-| MCP "mempalace" connection timed out | Use `scripts/mempalace_mcp_fast.py` in `.mcp.json` (not `mempalace.mcp_server`). Add `"env": {"MCP_TIMEOUT": "300000", "MCP_TOOL_TIMEOUT": "300000"}` to `~/.claude/settings.json`. |
-| Subprocess init 60000ms timeout | Ensure SessionStart uses `session_start_mempalace.py` (30s timeout). Use `mempalace_mcp_fast.py` for MCP. |
+| MCP "mempalace" connection timed out | Use `scripts/mempalace_mcp_fast.py` in `.mcp.json` (not `mempalace.mcp_server`). It answers initialize/ping instantly and imports mempalace in a background thread. Add `"env": {"MCP_TIMEOUT": "300000", "MCP_TOOL_TIMEOUT": "300000"}` to `~/.claude/settings.json`. |
+| Subprocess init 60000ms timeout (MCP connects fine, session still dies) | This is the SessionStart hook, not MCP. `session_start.py` bounds its in-process palace search to `hooks.session_start_timeout_seconds` (default 12s, in `config.json`) — lower it if a slow/cold disk under the palace still causes timeouts. Also confirm `.mcp.json` uses `mempalace_mcp_fast.py`. |
 | Palace HNSW diverged | `python3.11 -m mempalace repair --yes` |

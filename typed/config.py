@@ -40,6 +40,7 @@ _RANGE_RULES: dict[str, tuple[float, float]] = {
     "auto_demote_threshold": (1, 100),
     "week_4_target_drop": (0.01, 1.0),
     "week_8_target_drop": (0.01, 1.0),
+    "session_start_timeout_seconds": (1.0, 60.0),
 }
 
 import logging as _logging
@@ -86,6 +87,7 @@ class HooksConfig:
     post_tool_edit_max_neighbors: int = 4
     post_tool_edit_max_drawers: int = 2
     max_code_refs_per_drawer: int = 5
+    session_start_timeout_seconds: float = 12.0
 
 
 @dataclass

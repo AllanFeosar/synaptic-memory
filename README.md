@@ -488,6 +488,7 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `hooks` | `post_tool_edit_max_neighbors` | 4 | Max graphify neighbor files queried by the PostToolUse/Edit hook |
 | `hooks` | `post_tool_edit_max_drawers` | 2 | Max drawers surfaced per neighbor by the PostToolUse/Edit hook |
 | `hooks` | `max_code_refs_per_drawer` | 5 | Max code references extracted from a drawer body for graphify queries |
+| `hooks` | `session_start_timeout_seconds` | 12.0 | Wall-clock budget for `session_start.py`'s spreading-activation search (runs on a worker thread; on timeout it skips memory injection instead of blocking the session) |
 
 **Env var overrides** (take precedence over config.json):
 
@@ -514,13 +515,13 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `mempalace.yaml` | No (gitignored) | Your local room definitions |
 | `hooks/_common.py` | Yes | Shared utilities — `detect_scope()` used by all hooks |
 | `hooks/session_start_mempalace.py` | Yes | SessionStart hook — mempalace passthrough with 30s timeout |
-| `hooks/session_start.py` | Yes | SessionStart hook — spreading activation + graphify |
+| `hooks/session_start.py` | Yes | SessionStart hook — spreading activation + graphify, bounded by `hooks.session_start_timeout_seconds` (default 12s) |
 | `hooks/stop_15msg.py` | Yes | Stop hook (every 15 messages) — write-only |
 | `hooks/pre_compact.py` | Yes | PreCompact hook — spreading activation + graphify before compaction |
 | `hooks/pre_tool_write.py` | Yes | PreToolUse/Write hook — blocks writes to `.claude/memory/`, redirects to mempalace |
 | `hooks/pre_tool_read.py` | Yes | PreToolUse/Read hook — file-targeted memory injection |
 | `hooks/post_tool_edit.py` | Yes | PostToolUse/Edit hook — graphify neighbor surfacing after edits |
-| `scripts/mempalace_mcp_fast.py` | Yes | Fast-start MCP wrapper — skips blocking PRAGMA quick_check at startup |
+| `scripts/mempalace_mcp_fast.py` | Yes | Fast-start MCP wrapper — answers initialize/ping from stdlib instantly, imports mempalace in a background thread |
 | `scripts/adhd_test_report.py` | Yes | ADHD 1-week test monitoring — daily interrupt event report |
 | `scripts/mempal_to_graphify.py` | Yes | Bridge: mine ChromaDB → inject into graphify |
 | `scripts/graphify_wiki.py` | Yes | Obsidian wiki generator |
@@ -549,8 +550,8 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | graphify PreToolUse not firing | Ensure `graphify-out/graph.json` exists (run `/graphify` first) |
 | 0 memory nodes in graphify | Complete a session so hooks fire, then run `mempal_to_graphify.py` |
 | Obsidian shows no graph | Open `<project>/graphify-out/` not the synaptic-memory repo root |
-| MCP server "mempalace" connection timed out | Use `scripts/mempalace_mcp_fast.py` as the MCP command (skips blocking PRAGMA quick_check). Set `MCP_TIMEOUT=300000` and `MCP_TOOL_TIMEOUT=300000` in `~/.claude/settings.json` `env` section. |
-| Subprocess initialization 60000ms timeout | Ensure SessionStart hook uses `session_start_mempalace.py` (30s timeout wrapper). Check that `.mcp.json` uses `mempalace_mcp_fast.py`, not `mempalace.mcp_server` directly. |
+| MCP server "mempalace" connection timed out | Use `scripts/mempalace_mcp_fast.py` as the MCP command. It answers the MCP `initialize`/`ping` handshake from stdlib alone and imports mempalace in a background thread, so the handshake completes in well under a second regardless of palace size or disk speed. Set `MCP_TIMEOUT=300000` and `MCP_TOOL_TIMEOUT=300000` in `~/.claude/settings.json` `env` section. |
+| Subprocess initialization 60000ms timeout (MCP connects fine, but the session still dies) | This is the SessionStart hook, not the MCP server. `hooks/session_start.py` runs `inject_session_start()` in-process (real ONNX embedding + HNSW search against the palace) on a worker thread bounded by `hooks.session_start_timeout_seconds` (default 12s) — on timeout it prints nothing and exits instead of hanging the session. If you're still seeing the 60s kill, lower `hooks.session_start_timeout_seconds` in `config.json`, or check for a slow/cold disk under the palace path (HDD + large palace + this hook racing the MCP server's own cold-start import of the same palace is the classic cause). Also check `.mcp.json` uses `mempalace_mcp_fast.py`, not `mempalace.mcp_server` directly. |
 | Palace HNSW diverged | Run `python3.11 -m mempalace repair --yes` |
 | Consolidation task missing | Re-run the `Register-ScheduledTask` PowerShell block in Step 7 |
 | `consolidate-report.json` empty | Task ran but mempalace has no typed drawers yet — complete sessions first |
