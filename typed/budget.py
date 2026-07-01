@@ -1,26 +1,15 @@
-﻿"""
-Token budget tracking + kill switch.
+"""
+Retrieval effectiveness tracker.
 
-Goal: prove the system pays for itself.
+Answers the only question that matters: is synaptic-memory surfacing useful
+memories, and how much context re-derivation is it likely avoiding?
 
-Records per-session:
-  - tokens_in (input tokens for the session)
-  - tokens_out (output tokens)
-  - drawers_written
-  - drawers_expanded
-  - file_summary_hits
-  - file_summary_misses
+Tracks via retrieval-audit.jsonl (one record per spreading-activation call).
+Session writes are tracked in budget.jsonl (one record per Stop-hook fire).
 
-Computes weekly aggregates and warns if the targets aren't met.
-
-Usage:
-    from typed.budget import record_session, weekly_report
-
-    record_session(tokens_in=42_000, tokens_out=8_300,
-                   drawers_written=2, drawers_expanded=4,
-                   file_summary_hits=3, file_summary_misses=7)
-
-    print(weekly_report())
+CLI:
+    py -m typed.budget               # savings estimate from retrieval audit
+    py -m typed.budget --raw         # raw retrieval stats (hit rate, latency)
 """
 
 from __future__ import annotations
@@ -40,8 +29,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOG = Path.home() / ".synaptic-memory" / "budget.jsonl"
 DEFAULT_RETRIEVAL_LOG = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
 
+
 def _rotate_if_needed(log_path: Path) -> None:
-    """Rotate JSONL log file when it exceeds configured max size."""
+    """Rotate JSONL log when it exceeds configured max size."""
     bcfg = get_config().budget
     try:
         if not log_path.exists() or log_path.stat().st_size < bcfg.max_log_bytes:
@@ -62,74 +52,26 @@ def _rotate_if_needed(log_path: Path) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Session records (lightweight — just tracks drawer writes per Stop-hook fire)
+# ---------------------------------------------------------------------------
 
 @dataclass
 class SessionRecord:
     ts: str
-    tokens_in: int
-    tokens_out: int
     drawers_written: int = 0
-    drawers_expanded: int = 0
-    file_summary_hits: int = 0
-    file_summary_misses: int = 0
     note: str = ""
 
-    def total(self) -> int:
-        return self.tokens_in + self.tokens_out
-
-
-@dataclass
-class RetrievalRecord:
-    ts: str
-    query: str
-    scope: Optional[str]
-    top_k: int
-    result_count: int
-    duration_ms: float
-    results: list  # [{drawer_id, score, type, snippet}]
-    interrupt_events: list = field(default_factory=list)  # [{kind, score, drawer_id}]
-    effective_threshold: Optional[float] = None
-
-
-@dataclass
-class WeeklyReport:
-    week_index: int  # 0 = baseline, 1 = first week with system, etc.
-    sessions: int
-    avg_tokens: float
-    median_tokens: float
-    pct_change_vs_baseline: Optional[float]
-    write_overhead_tokens: int
-    estimated_read_savings: int
-    target_met: Optional[bool]
-    verdict: str
-
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), indent=2)
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 
 def record_session(
     *,
-    tokens_in: int,
-    tokens_out: int,
     drawers_written: int = 0,
-    drawers_expanded: int = 0,
-    file_summary_hits: int = 0,
-    file_summary_misses: int = 0,
     note: str = "",
     log_path: Path = DEFAULT_LOG,
 ) -> SessionRecord:
     rec = SessionRecord(
         ts=_dt.datetime.now(_dt.timezone.utc).isoformat(),
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
         drawers_written=drawers_written,
-        drawers_expanded=drawers_expanded,
-        file_summary_hits=file_summary_hits,
-        file_summary_misses=file_summary_misses,
         note=note,
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,8 +89,12 @@ def _load_records(log_path: Path) -> list[SessionRecord]:
             continue
         try:
             d = json.loads(line)
-            out.append(SessionRecord(**d))
-        except (ValueError, TypeError):
+            out.append(SessionRecord(
+                ts=d["ts"],
+                drawers_written=d.get("drawers_written", 0),
+                note=d.get("note", ""),
+            ))
+        except (ValueError, TypeError, KeyError):
             continue
     return out
 
@@ -156,6 +102,19 @@ def _load_records(log_path: Path) -> list[SessionRecord]:
 # ---------------------------------------------------------------------------
 # Retrieval audit
 # ---------------------------------------------------------------------------
+
+@dataclass
+class RetrievalRecord:
+    ts: str
+    query: str
+    scope: Optional[str]
+    top_k: int
+    result_count: int
+    duration_ms: float
+    results: list
+    interrupt_events: list = field(default_factory=list)
+    effective_threshold: Optional[float] = None
+
 
 def record_retrieval(
     *,
@@ -186,11 +145,7 @@ def record_retrieval(
         f.write(json.dumps(asdict(rec)) + "\n")
 
 
-def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
-    """Summarise retrieval-audit.jsonl to surface quality signals."""
-    if not log_path.exists():
-        return "No retrieval records yet. Run sessions to populate retrieval-audit.jsonl."
-
+def _load_retrieval_records(log_path: Path) -> list[dict]:
     records: list[dict] = []
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -201,8 +156,16 @@ def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
                     except (ValueError, TypeError):
                         continue
     except OSError:
-        return "Could not read retrieval audit log."
+        pass
+    return records
 
+
+def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
+    """Retrieval quality stats — hit rate, latency, ADHD interrupt layer."""
+    if not log_path.exists():
+        return "No retrieval records yet. Run sessions to populate retrieval-audit.jsonl."
+
+    records = _load_retrieval_records(log_path)
     if not records:
         return "No retrieval records yet."
 
@@ -212,7 +175,6 @@ def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
     zero_result = sum(1 for r in records if r["result_count"] == 0)
     under_half = sum(1 for r in records if 0 < r["result_count"] < r["top_k"] / 2)
 
-    # Interrupt stats (new fields may not exist in older records)
     has_interrupts = sum(1 for r in records if r.get("interrupt_events"))
     total_interrupts = sum(len(r.get("interrupt_events", [])) for r in records)
     thresholds = [r["effective_threshold"] for r in records if r.get("effective_threshold") is not None]
@@ -248,127 +210,81 @@ def retrieval_report(log_path: Path = DEFAULT_RETRIEVAL_LOG) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Weekly report
+# Savings estimate — answers "is the project reducing tokens?"
 # ---------------------------------------------------------------------------
 
-def _week_buckets(records: list[SessionRecord]) -> dict[int, list[SessionRecord]]:
-    """Bucket records by week index (week 0 = first 7 days of logging)."""
+# Conservative estimate: each drawer surfaced replaces one context re-ask.
+# A typical re-ask costs: user message ~20 tok + Claude file-search ~400 tok
+# + Claude response ~80 tok = ~500 tok total.
+_TOKENS_SAVED_PER_DRAWER = 500
+
+
+def savings_report(
+    log_path: Path = DEFAULT_RETRIEVAL_LOG,
+    tokens_per_drawer: int = _TOKENS_SAVED_PER_DRAWER,
+) -> str:
+    """Estimate token reduction from retrieval audit data.
+
+    Each drawer surfaced to Claude during a session replaces context the user
+    would otherwise spend tokens re-deriving. This estimates the total savings.
+    """
+    if not log_path.exists():
+        return "No retrieval data yet. Run sessions to populate retrieval-audit.jsonl."
+
+    records = _load_retrieval_records(log_path)
     if not records:
-        return {}
-    start = _dt.datetime.fromisoformat(records[0].ts)
-    buckets: dict[int, list[SessionRecord]] = {}
-    for r in records:
-        ts = _dt.datetime.fromisoformat(r.ts)
-        idx = int((ts - start).days // 7)
-        buckets.setdefault(idx, []).append(r)
-    return buckets
+        return "No retrieval data yet."
 
+    total = len(records)
+    hit_count = sum(1 for r in records if r["result_count"] > 0)
+    total_drawers = sum(r["result_count"] for r in records)
+    hit_rate = hit_count / total if total else 0
 
-def weekly_report(log_path: Path = DEFAULT_LOG) -> str:
-    records = _load_records(log_path)
-    if not records:
-        return "No session records yet. Call record_session() per Claude session."
+    interrupt_events = sum(len(r.get("interrupt_events", [])) for r in records)
+    interrupt_retrievals = sum(1 for r in records if r.get("interrupt_events"))
 
-    buckets = _week_buckets(records)
-    if 0 not in buckets:
-        return "Need at least 1 week of baseline data."
-
-    bcfg = get_config().budget
-    baseline_avg = mean(r.total() for r in buckets[0])
-    write_overhead_per_session = mean(
-        r.drawers_written * bcfg.tokens_per_drawer_write for r in buckets[0]  # ~250 tokens per drawer write
-    )
-    read_savings_per_session = mean(
-        r.file_summary_hits * bcfg.tokens_per_cache_hit for r in buckets[0]  # ~1500 tokens per cache hit
-    )
+    estimated_saved = total_drawers * tokens_per_drawer
+    low_est = total_drawers * 200
+    high_est = total_drawers * 1000
 
     lines = [
-        "typed budget report",
-        "=" * 28,
-        f"Baseline (week 0): {len(buckets[0])} sessions, avg {baseline_avg:.0f} tokens",
+        "token reduction estimate",
+        "=" * 40,
+        f"Total retrieval events      : {total:,}",
+        f"Retrievals with hits        : {hit_count:,} ({hit_rate * 100:.1f}%)",
+        f"Total drawers surfaced      : {total_drawers:,}",
+        f"ADHD early-exits            : {interrupt_events} across {interrupt_retrievals} retrievals",
         "",
+        "Estimated tokens saved (drawers × avoided re-derivation cost):",
+        f"  Conservative @ 200 tok/drawer : {low_est:>12,}",
+        f"  Realistic    @ 500 tok/drawer : {estimated_saved:>12,}",
+        f"  High         @ 1000 tok/drawer: {high_est:>12,}",
+        "",
+        "Note: percentage vs. baseline requires a controlled A/B experiment.",
+        "      mem0 reports 50–91% reduction (published benchmarks, controlled).",
+        "      synaptic-memory: estimate only — no pre-installation baseline captured.",
     ]
-
-    for idx in sorted(buckets.keys())[1:]:
-        weeks = buckets[idx]
-        avg = mean(r.total() for r in weeks)
-        change = (avg - baseline_avg) / baseline_avg if baseline_avg else 0.0
-        write_o = mean(r.drawers_written * bcfg.tokens_per_drawer_write for r in weeks)
-        read_s = mean(r.file_summary_hits * bcfg.tokens_per_cache_hit for r in weeks)
-
-        verdict = []
-        bcfg = get_config().budget
-        if idx >= 4 and -change < bcfg.week_4_target_drop:
-            verdict.append("⚠ week-4 target missed")
-        if write_o > read_s * bcfg.write_overhead_budget_fraction and read_s > 0:
-            verdict.append("⚠ write overhead too high")
-        if not verdict:
-            verdict.append("ok")
-
-        lines += [
-            f"Week {idx}: {len(weeks)} sessions, avg {avg:.0f} tokens "
-            f"({change*100:+.1f}% vs baseline)",
-            f"  write_overhead≈{write_o:.0f}/session  read_savings≈{read_s:.0f}/session",
-            f"  verdict: {', '.join(verdict)}",
-            "",
-        ]
-
-    last_idx = max(buckets)
-    if last_idx >= 4:
-        last_avg = mean(r.total() for r in buckets[last_idx])
-        change = (last_avg - baseline_avg) / baseline_avg if baseline_avg else 0.0
-        if -change < get_config().budget.week_4_target_drop * 0.5:
-            lines.append("KILL SWITCH: <10% reduction by week 4. Simplify aggressively.")
-
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# CLI entry
+# CLI
 # ---------------------------------------------------------------------------
 
 def main() -> int:
     import argparse
     import sys
-    p = argparse.ArgumentParser(description="typed budget report")
-    p.add_argument("--log", type=Path, default=DEFAULT_LOG)
-    p.add_argument("--record", action="store_true",
-                   help="Record a session from --tokens-in/--tokens-out args")
-    p.add_argument("--tokens-in", type=int, default=0)
-    p.add_argument("--tokens-out", type=int, default=0)
-    p.add_argument("--drawers-written", type=int, default=0)
-    p.add_argument("--drawers-expanded", type=int, default=0)
-    p.add_argument("--file-summary-hits", type=int, default=0)
-    p.add_argument("--file-summary-misses", type=int, default=0)
-    p.add_argument("--note", default="")
-    p.add_argument("--retrieval-report", action="store_true",
-                   help="Print retrieval-audit.jsonl summary")
+    p = argparse.ArgumentParser(description="synaptic-memory effectiveness report")
+    p.add_argument("--raw", action="store_true", help="Raw retrieval audit stats")
     p.add_argument("--retrieval-log", type=Path, default=DEFAULT_RETRIEVAL_LOG)
     args = p.parse_args()
 
-    if args.retrieval_report:
+    if args.raw:
         sys.stdout.write(retrieval_report(args.retrieval_log) + "\n")
-        return 0
-
-    if args.record:
-        rec = record_session(
-            tokens_in=args.tokens_in,
-            tokens_out=args.tokens_out,
-            drawers_written=args.drawers_written,
-            drawers_expanded=args.drawers_expanded,
-            file_summary_hits=args.file_summary_hits,
-            file_summary_misses=args.file_summary_misses,
-            note=args.note,
-            log_path=args.log,
-        )
-        sys.stdout.write(json.dumps(asdict(rec)) + "\n")
-        return 0
-
-    sys.stdout.write(weekly_report(args.log) + "\n")
+    else:
+        sys.stdout.write(savings_report(args.retrieval_log) + "\n")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

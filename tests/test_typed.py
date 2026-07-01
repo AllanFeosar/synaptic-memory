@@ -627,11 +627,11 @@ class TestBudgetMath(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "budget.jsonl"
-            record_session(tokens_in=10, tokens_out=5, log_path=log)
-            record_session(tokens_in=20, tokens_out=10, log_path=log)
+            record_session(drawers_written=1, log_path=log)
+            record_session(drawers_written=2, log_path=log)
             recs = _load_records(log)
             self.assertEqual(len(recs), 2)
-            self.assertEqual(recs[1].tokens_in, 20)
+            self.assertEqual(recs[1].drawers_written, 2)
 
 
 if __name__ == "__main__":

@@ -38,8 +38,6 @@ _RANGE_RULES: dict[str, tuple[float, float]] = {
     "adaptive_min_samples": (1, 10000),
     "adaptive_percentile": (0.5, 1.0),
     "auto_demote_threshold": (1, 100),
-    "week_4_target_drop": (0.01, 1.0),
-    "week_8_target_drop": (0.01, 1.0),
     "session_start_timeout_seconds": (1.0, 60.0),
 }
 
@@ -141,11 +139,6 @@ class TelemetryConfig:
 
 @dataclass
 class BudgetConfig:
-    week_4_target_drop: float = 0.20
-    week_8_target_drop: float = 0.30
-    write_overhead_budget_fraction: float = 0.30
-    tokens_per_drawer_write: int = 250
-    tokens_per_cache_hit: int = 1500
     max_log_bytes: int = 10485760
     log_keep_rotated: int = 3
 
