@@ -174,6 +174,46 @@ def _warm_block_live(question: str, scope: str, timeout: float) -> tuple[str, st
 
 
 # ---------------------------------------------------------------------------
+# Output token measurement via Claude API
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = (
+    "You are a software engineer. Answer the question based only on the "
+    "provided context. Be concise but complete."
+)
+
+
+def _measure_output_tokens(
+    cold_user_msg: str,
+    warm_user_msg: str,
+    model: str,
+) -> tuple[int, int, str]:
+    """
+    Call Claude API with cold and warm prompts, return real output token counts.
+    Returns (cold_output_tokens, warm_output_tokens, error_or_empty).
+    """
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+
+        cold_resp = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": cold_user_msg}],
+        )
+        warm_resp = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": warm_user_msg}],
+        )
+        return cold_resp.usage.output_tokens, warm_resp.usage.output_tokens, ""
+    except Exception as exc:  # noqa: BLE001
+        return 0, 0, str(exc)
+
+
+# ---------------------------------------------------------------------------
 # Cold path
 # ---------------------------------------------------------------------------
 
@@ -203,15 +243,25 @@ class TestResult:
     cold_total: int
     warm_block_tokens: int
     warm_total: int
-    warm_source: str       # "config" / "live" / "config(live-timeout)" / etc.
+    warm_source: str                        # "config" / "live" / etc.
     input_reduction_pct: float
+    cold_output_tokens: Optional[int] = None
+    warm_output_tokens: Optional[int] = None
+    output_reduction_pct: Optional[float] = None
+    combined_reduction_pct: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_one(tc: TestCase, live: bool, live_timeout: float) -> TestResult:
+def run_one(
+    tc: TestCase,
+    live: bool,
+    live_timeout: float,
+    measure_output: bool = False,
+    model: str = "claude-haiku-4-5-20251001",
+) -> TestResult:
     question_tokens = _tok(tc.question)
 
     cold_content, found_files = _cold_content(tc.cold_files)
@@ -225,7 +275,23 @@ def run_one(tc: TestCase, live: bool, live_timeout: float) -> TestResult:
 
     warm_block_tokens = _tok(warm_block)
     warm_total = question_tokens + warm_block_tokens
-    reduction = (cold_total - warm_total) / cold_total * 100 if cold_total > 0 else 0.0
+    input_reduction = (cold_total - warm_total) / cold_total * 100 if cold_total > 0 else 0.0
+
+    cold_out = warm_out = None
+    out_reduction = combined_reduction = None
+
+    if measure_output:
+        cold_user_msg = f"Source code:\n\n{cold_content}\n\nQuestion: {tc.question}"
+        warm_user_msg = f"{warm_block}\n\nQuestion: {tc.question}"
+        cold_out, warm_out, err = _measure_output_tokens(cold_user_msg, warm_user_msg, model)
+        if err:
+            sys.stderr.write(f"  [warn] output measurement failed: {err}\n")
+            cold_out = warm_out = None
+        else:
+            out_reduction = (cold_out - warm_out) / cold_out * 100 if cold_out else 0.0
+            cold_combined = cold_total + cold_out
+            warm_combined = warm_total + warm_out
+            combined_reduction = (cold_combined - warm_combined) / cold_combined * 100
 
     return TestResult(
         question=tc.question,
@@ -236,7 +302,11 @@ def run_one(tc: TestCase, live: bool, live_timeout: float) -> TestResult:
         warm_block_tokens=warm_block_tokens,
         warm_total=warm_total,
         warm_source=warm_source,
-        input_reduction_pct=reduction,
+        input_reduction_pct=input_reduction,
+        cold_output_tokens=cold_out,
+        warm_output_tokens=warm_out,
+        output_reduction_pct=out_reduction,
+        combined_reduction_pct=combined_reduction,
     )
 
 
@@ -256,37 +326,56 @@ def print_report(results: list[TestResult], live: bool) -> None:
     print(f"Warm mode    : {mode}")
     print()
 
+    has_output = any(r.output_reduction_pct is not None for r in results)
+
     for i, r in enumerate(results, 1):
         q_short = r.question[:68] + ("…" if len(r.question) > 68 else "")
         print(f"Q{i}. {q_short}")
-        print(f"    Cold files : {', '.join(r.cold_files_found) or '(none found)'}")
-        print(f"    Cold input : {r.cold_total:>7,} tok  "
-              f"(files {r.cold_file_tokens:,} + question {r.question_tokens})")
-        print(f"    Warm input : {r.warm_total:>7,} tok  "
-              f"(block {r.warm_block_tokens:,} + question {r.question_tokens})"
+        print(f"    Cold files  : {', '.join(r.cold_files_found) or '(none found)'}")
+        print(f"    Cold input  : {r.cold_total:>7,} tok  "
+              f"(files {r.cold_file_tokens:,} + q {r.question_tokens})")
+        print(f"    Warm input  : {r.warm_total:>7,} tok  "
+              f"(block {r.warm_block_tokens:,} + q {r.question_tokens})"
               f"  [{r.warm_source}]")
-        print(f"    Reduction  : {r.input_reduction_pct:>6.1f}%")
+        print(f"    Input red.  : {r.input_reduction_pct:>6.1f}%")
+        if r.output_reduction_pct is not None:
+            print(f"    Cold output : {r.cold_output_tokens:>7,} tok")
+            print(f"    Warm output : {r.warm_output_tokens:>7,} tok")
+            print(f"    Output red. : {r.output_reduction_pct:>6.1f}%")
+            print(f"    Combined    : {r.combined_reduction_pct:>6.1f}%  ← input + output")
         print()
 
     reductions = [r.input_reduction_pct for r in results]
     total_cold = sum(r.cold_total for r in results)
     total_warm = sum(r.warm_total for r in results)
-    overall = (total_cold - total_warm) / total_cold * 100
+    overall_input = (total_cold - total_warm) / total_cold * 100
 
     print("-" * 54)
     print("SUMMARY")
-    print(f"  Questions tested         : {len(results)}")
-    print(f"  Avg input reduction      : {mean(reductions):.1f}%")
-    print(f"  Range                    : {min(reductions):.1f}% – {max(reductions):.1f}%")
-    print(f"  Overall (token-weighted) : {overall:.1f}%")
-    print()
-    print("  Measured: input tokens only (cold file reads vs warm memory block).")
-    print("  Output tokens not measured — warm responses are shorter (est. +30–50%)")
-    print("  making total reduction higher than the input-only figure above.")
+    print(f"  Questions tested            : {len(results)}")
+    print(f"  Avg input reduction         : {mean(reductions):.1f}%")
+    print(f"  Overall input (tok-weighted): {overall_input:.1f}%")
+
+    if has_output:
+        out_results = [r for r in results if r.output_reduction_pct is not None]
+        avg_out = mean(r.output_reduction_pct for r in out_results)
+        avg_combined = mean(r.combined_reduction_pct for r in out_results)
+        tc_in  = sum(r.cold_total + r.cold_output_tokens for r in out_results)
+        tc_warm = sum(r.warm_total + r.warm_output_tokens for r in out_results)
+        overall_combined = (tc_in - tc_warm) / tc_in * 100
+        print(f"  Avg output reduction        : {avg_out:.1f}%")
+        print(f"  Avg combined (in+out)       : {avg_combined:.1f}%")
+        print(f"  Overall combined (weighted) : {overall_combined:.1f}%")
+    else:
+        print()
+        print("  Output tokens not measured — run with --measure-output to add them.")
+        print("  Warm responses are shorter (est. 40–60% output reduction),")
+        print("  making combined reduction higher than the input-only figure above.")
+
     if not live:
         print()
         print("  Warm block is config-derived (top_k=3, summary_max_chars=180).")
-        print("  Run with --live for real retrieval results (requires warm palace).")
+        print("  Run with --live for real retrieval (requires warm palace).")
 
 
 # ---------------------------------------------------------------------------
@@ -297,11 +386,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Token reduction test harness")
     parser.add_argument(
         "--live", action="store_true",
-        help="Use real palace retrieval for warm path (requires palace to be warm)",
+        help="Use real palace retrieval for warm path (requires warm palace)",
     )
     parser.add_argument(
         "--live-timeout", type=float, default=30.0,
         help="Seconds per question for live retrieval (default: 30)",
+    )
+    parser.add_argument(
+        "--measure-output", action="store_true",
+        help="Call Claude API to measure real output token reduction (~$0.04/run)",
+    )
+    parser.add_argument(
+        "--model", default="claude-haiku-4-5-20251001",
+        help="Model for --measure-output (default: claude-haiku-4-5-20251001)",
     )
     parser.add_argument(
         "--json", action="store_true",
@@ -309,10 +406,22 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.measure_output:
+        sys.stderr.write(
+            f"Output measurement ON — calling {args.model} (cold+warm) per question.\n"
+            f"Estimated cost: ~$0.04 for 5 questions.\n"
+        )
+
     results: list[TestResult] = []
     for i, tc in enumerate(TEST_CASES, 1):
         sys.stderr.write(f"[{i}/{len(TEST_CASES)}] {tc.question[:60]}…\n")
-        results.append(run_one(tc, live=args.live, live_timeout=args.live_timeout))
+        results.append(run_one(
+            tc,
+            live=args.live,
+            live_timeout=args.live_timeout,
+            measure_output=args.measure_output,
+            model=args.model,
+        ))
 
     if args.json:
         print(json.dumps([asdict(r) for r in results], indent=2))
