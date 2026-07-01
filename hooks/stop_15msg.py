@@ -11,8 +11,11 @@ v2 behavior:
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
@@ -25,6 +28,59 @@ from typed.write import write_session_summary  # noqa: E402
 
 from hooks._common import detect_scope  # noqa: E402
 
+
+def _read_session_tokens() -> tuple[int, int, int]:
+    """Read token usage from the current session's Claude Code conversation log.
+
+    Finds the most recently modified JSONL in ~/.claude/projects/*/
+    (that file IS the current session's log — Stop fires before Claude closes it).
+    Returns (tokens_in, tokens_out, cache_read_tokens).
+    All three are real API-reported counts, same source as the "Claude Code Usage" extension.
+    """
+    try:
+        projects_dir = Path.home() / ".claude" / "projects"
+        if not projects_dir.exists():
+            return 0, 0, 0
+
+        # Session ID env var lets us find the exact file; fall back to most-recent.
+        session_id = (
+            os.environ.get("CLAUDE_SESSION_ID")
+            or os.environ.get("CLAUDE_CONVERSATION_ID")
+        )
+        candidates = list(projects_dir.glob("*/*.jsonl"))
+        if not candidates:
+            return 0, 0, 0
+
+        if session_id:
+            exact = [p for p in candidates if p.stem == session_id]
+            log_file = exact[0] if exact else max(candidates, key=lambda p: p.stat().st_mtime)
+        else:
+            log_file = max(candidates, key=lambda p: p.stat().st_mtime)
+
+        # Safety: ignore logs older than 4 hours (can't be the current session)
+        if time.time() - log_file.stat().st_mtime > 14400:
+            return 0, 0, 0
+
+        tokens_in = tokens_out = cache_read = 0
+        for line in log_file.open(encoding="utf-8", errors="replace"):
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+                usage = (r.get("message") or {}).get("usage") or r.get("usage") or {}
+                tokens_in += (
+                    usage.get("input_tokens", 0)
+                    + usage.get("cache_creation_input_tokens", 0)
+                    + usage.get("cache_read_input_tokens", 0)
+                )
+                tokens_out += usage.get("output_tokens", 0)
+                cache_read += usage.get("cache_read_input_tokens", 0)
+            except (json.JSONDecodeError, TypeError, KeyError):
+                continue
+
+        return tokens_in, tokens_out, cache_read
+    except Exception:  # noqa: BLE001
+        return 0, 0, 0
 
 
 def passthrough_mempalace() -> None:
@@ -61,7 +117,13 @@ def main() -> int:
         return 0  # never fail the session
 
     try:
-        record_session(drawers_written=1)
+        tok_in, tok_out, cache_read = _read_session_tokens()
+        record_session(
+            tokens_in=tok_in,
+            tokens_out=tok_out,
+            drawers_written=1,
+            note=f"cache_read={cache_read}" if cache_read else "",
+        )
     except Exception:  # noqa: BLE001
         pass  # budget tracking must never crash the hook
 
