@@ -84,6 +84,7 @@ class ConsolidateReport:
     projects_discovered: list[str] = field(default_factory=list)
     projects_synced: list[str] = field(default_factory=list)
     projects_failed: list[str] = field(default_factory=list)
+    projects_skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     partial: bool = False
 
@@ -380,15 +381,28 @@ def _sync_project_graph(
             capture_output=True, text=True, timeout=300,
             cwd=str(project_root),
         )
+        # Contract with mempal_to_graphify.py: exit 75 means "palace was
+        # locked by another process (e.g. a live mempalace MCP server) —
+        # skip this run, safe to retry later." Not a failure.
+        if result.returncode == 75:
+            report.projects_skipped.append(str(project_root))
+            return False
         if result.returncode != 0:
             report.errors.append(
-                f"[{project_root.name}] mempal_to_graphify failed: "
-                f"{result.stderr.strip()[:400]}"
+                f"[{project_root.name}] mempal_to_graphify failed (exit {result.returncode}): "
+                f"{result.stderr.strip()[-400:] or result.stdout.strip()[-400:]}"
             )
             report.projects_failed.append(str(project_root))
             return False
     except subprocess.SubprocessError as e:
-        report.errors.append(f"[{project_root.name}] mempal_to_graphify exception: {e}")
+        stdout_tail = (getattr(e, "stdout", None) or "")[-400:]
+        stderr_tail = (getattr(e, "stderr", None) or "")[-400:]
+        detail = ""
+        if stdout_tail:
+            detail += f" | stdout tail: {stdout_tail}"
+        if stderr_tail:
+            detail += f" | stderr tail: {stderr_tail}"
+        report.errors.append(f"[{project_root.name}] mempal_to_graphify exception: {e}{detail}")
         report.projects_failed.append(str(project_root))
         return False
 

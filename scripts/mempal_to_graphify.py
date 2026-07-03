@@ -31,16 +31,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 # ── Locate project root (one level up from this script) ──────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 GRAPH_JSON   = PROJECT_ROOT / "graphify-out" / "graph.json"
 CONFIG_FILE  = PROJECT_ROOT / "mempalace.project.json"
+
+# Exit code signaling "the palace was locked by another process (e.g. a live
+# mempalace MCP server) — skip this run, safe to retry later." consolidate.py
+# checks for this exact code and reports it as a soft skip, not a failure.
+EXIT_SKIPPED = 75
 
 
 # ── Load project config ───────────────────────────────────────────────────────
@@ -95,12 +103,37 @@ def find_memory_dir(project_slug: str) -> Path | None:
     return None
 
 
+# ── Bounded subprocess runner (kills the whole process tree on timeout) ──────
+def _run_with_timeout(cmd: list[str], timeout: int) -> subprocess.CompletedProcess | None:
+    """
+    Runs cmd, returns None on timeout instead of raising.
+
+    Windows launchers like "py -3.11" spawn a real python.exe as a child —
+    subprocess.run(timeout=...) only kills the launcher itself, orphaning the
+    interpreter (and whatever lock it's holding). We track the PID ourselves
+    and use `taskkill /T` to kill the full tree on timeout.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        else:
+            proc.kill()
+        proc.communicate()
+        return None
+
+
 # ── Mine Claude memory into palace ────────────────────────────────────────────
-def mine_memory_into_palace(memory_dir: Path, wing: str) -> None:
+def mine_memory_into_palace(memory_dir: Path, wing: str) -> bool:
     """
     Runs: py -3.11 -m mempalace mine <memory_dir> --wing <wing>
     Tags all Claude memory files for this project into ChromaDB.
     Copies mempalace.yaml into memory_dir first (required by mempalace mine).
+
+    Returns True if the palace was busy/locked and mining had to be skipped.
     """
     # mempalace mine requires mempalace.yaml in the target dir
     # Look in project root first, then mempalace-refs/ as fallback
@@ -117,7 +150,15 @@ def mine_memory_into_palace(memory_dir: Path, wing: str) -> None:
     result = None
     for py in ("py -3.11", "python3.11", "python3", "python"):
         cmd = py.split() + mine_cmd
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = _run_with_timeout(cmd, timeout=60)
+        if result is None:
+            # Every launcher hits the same palace file — retrying with a
+            # different interpreter won't unstick a lock. Stop immediately.
+            print(
+                "[mempal_bridge] SKIPPED: palace busy (locked by another process, "
+                "e.g. a live mempalace MCP server) — mine timed out after 60s"
+            )
+            return True
         if result.returncode == 0:
             break
         if "No module named" not in (result.stderr or ""):
@@ -127,6 +168,7 @@ def mine_memory_into_palace(memory_dir: Path, wing: str) -> None:
     else:
         out = (result.stdout or "") + (result.stderr or "") if result else ""
         print(f"[mempal_bridge] Mine warning (exit {result.returncode if result else '?'}): {out[-300:] if out else 'no output'}")
+    return False
 
 
 # ── Query ChromaDB by wing ────────────────────────────────────────────────────
@@ -134,6 +176,13 @@ def query_palace_by_wing(palace_path: Path, wing: str) -> list[dict]:
     """
     Returns all documents tagged with this wing.
     Each entry: {text, wing, room, source_file}
+
+    Runs the actual ChromaDB open+query on a daemon thread with a bounded
+    wait: chromadb.PersistentClient() blocks forever (not a slow query — a
+    real lock-wait) if another process already has this palace open, e.g. a
+    live mempalace MCP server. A daemon thread (not ThreadPoolExecutor, whose
+    worker threads are joined at interpreter exit) plus os._exit() lets the
+    process leave promptly without waiting on the stuck worker.
     """
     try:
         import chromadb
@@ -142,18 +191,32 @@ def query_palace_by_wing(palace_path: Path, wing: str) -> list[dict]:
         print("  Run: py -3.11 -m pip install chromadb")
         sys.exit(1)
 
+    result_q: "queue.Queue[tuple[str, object]]" = queue.Queue(maxsize=1)
+
+    def _worker() -> None:
+        try:
+            client = chromadb.PersistentClient(path=str(palace_path))
+            col = client.get_collection("mempalace_drawers")
+            res = col.get(where={"wing": wing}, include=["documents", "metadatas"])
+            result_q.put(("ok", res))
+        except Exception as e:  # noqa: BLE001
+            result_q.put(("error", e))
+
+    threading.Thread(target=_worker, daemon=True).start()
     try:
-        client = chromadb.PersistentClient(path=str(palace_path))
-        col    = client.get_collection("mempalace_drawers")
-    except Exception as e:
-        print(f"[mempal_bridge] ERROR: Cannot open palace at {palace_path}: {e}")
+        status, payload = result_q.get(timeout=30)
+    except queue.Empty:
+        print(
+            "[mempal_bridge] SKIPPED: palace busy (locked by another process, "
+            "e.g. a live mempalace MCP server) — wing query timed out after 30s"
+        )
+        os._exit(EXIT_SKIPPED)  # force-exit; the stuck worker thread is abandoned
+
+    if status == "error":
+        print(f"[mempal_bridge] ERROR: Cannot open palace at {palace_path}: {payload}")
         sys.exit(1)
 
-    result = col.get(
-        where={"wing": wing},
-        include=["documents", "metadatas"],
-    )
-
+    result = payload
     docs  = result.get("documents", [])
     metas = result.get("metadatas", [])
 
@@ -270,27 +333,34 @@ def inject_memory_nodes(hits: list[dict], wing: str) -> int:
 
 # ── Run graphify rebuild ──────────────────────────────────────────────────────
 def run_graphify() -> None:
-    import subprocess
     print("[mempal_bridge] Running graphify rebuild...")
     rebuild_cmd = (
         "from graphify.watch import _rebuild_code; "
         "from pathlib import Path; "
         f"_rebuild_code(Path(r'{PROJECT_ROOT}'))"
     )
-    # Try py launchers in order — graphify is on 3.14 on this machine
+    # Try py launchers in order — graphify is on 3.14 on this machine.
+    # Each launcher is an independent interpreter (unlike the palace mine
+    # step, a hang here isn't a shared-lock guarantee), so on timeout we
+    # still try the next one rather than giving up immediately.
     result = None
     for py in ("py -3.14", "py -3.11", "python"):
         cmd = py.split() + ["-c", rebuild_cmd]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = _run_with_timeout(cmd, timeout=60)
+        if result is None:
+            print(f"[mempal_bridge] '{py}' timed out after 60s — trying next launcher")
+            continue
         if result.returncode == 0:
             break
-        if result and "No module named" not in (result.stderr or ""):
+        if "No module named" not in (result.stderr or ""):
             break  # real error, stop trying
 
     if result and result.returncode == 0:
         print("[mempal_bridge] Graphify rebuild complete.")
+    elif result is None:
+        print("[mempal_bridge] Graphify rebuild SKIPPED: all launchers timed out.")
     else:
-        stderr = result.stderr[-300:] if result else ""
+        stderr = result.stderr[-300:] if result.stderr else ""
         print(f"[mempal_bridge] Graphify rebuild error: {stderr}")
 
 
@@ -311,14 +381,21 @@ def main() -> None:
 
     # Mine Claude memory files into ChromaDB before querying
     memory_dir = find_memory_dir(cfg["project_slug"])
+    palace_busy = False
     if memory_dir:
         print(f"[mempal_bridge] Memory dir: {memory_dir}")
-        mine_memory_into_palace(memory_dir, wing)
+        palace_busy = mine_memory_into_palace(memory_dir, wing)
     else:
         print(f"[mempal_bridge] WARNING: No Claude memory dir found for '{cfg['project_slug']}' — skipping mine step.")
 
     if not args.bridge_only:
         run_graphify()
+
+    if palace_busy:
+        # Already confirmed locked during the mine step — querying it again
+        # would just wait out the same lock. Skip straight to exit.
+        print("[mempal_bridge] SKIPPED: palace was busy — skipping wing query too (will retry next run).")
+        sys.exit(EXIT_SKIPPED)
 
     hits = query_palace_by_wing(palace_path, wing)
 
