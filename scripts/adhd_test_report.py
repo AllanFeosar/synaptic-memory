@@ -9,10 +9,29 @@ from pathlib import Path
 LOG = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
 
 
+def _classify_source(rec):
+    """Hook source for a record: the explicit `source` tag if present, else
+    inferred from the (top_k, query==scope) signature. Inferred labels get a
+    `?` suffix. Records pre-date the source tag until the 2026-07-15 wiring."""
+    src = rec.get("source")
+    if src:
+        return src
+    tk = rec.get("top_k")
+    q = (rec.get("query") or "").strip()
+    s = (rec.get("scope") or "").strip()
+    if tk == 3:
+        return "session_start?" if q and q == s else "pre_tool_read?"
+    if tk == 2:
+        return "post_tool_edit?"
+    if isinstance(tk, int) and tk >= 6:
+        return "pre_compact?"
+    return "unknown?"
+
+
 def main():
     parser = argparse.ArgumentParser(description="ADHD layer test report")
-    parser.add_argument("--baseline-date", default="2026-06-27")
-    parser.add_argument("--baseline-records", type=int, default=3193)
+    parser.add_argument("--baseline-date", default="2026-07-15")
+    parser.add_argument("--baseline-records", type=int, default=10031)
     args = parser.parse_args()
     BASELINE_DATE = args.baseline_date
     BASELINE_RECORDS = args.baseline_records
@@ -34,6 +53,8 @@ def main():
     test_interrupt_events = 0
     interrupt_kinds = Counter()
     thresholds = []
+    source_total = Counter()
+    source_fired = Counter()
 
     for rec in records:
         for r in rec.get("results", []):
@@ -47,9 +68,12 @@ def main():
             if isinstance(s, (int, float)):
                 test_scores.append(s)
         evts = rec.get("interrupt_events", [])
+        src = _classify_source(rec)
+        source_total[src] += 1
         if evts:
             test_interrupt_count += 1
             test_interrupt_events += len(evts)
+            source_fired[src] += 1
             for e in evts:
                 interrupt_kinds[e.get("kind", "?")] += 1
         t = rec.get("effective_threshold")
@@ -76,6 +100,16 @@ def main():
     if interrupt_kinds:
         print(f"  By kind: {dict(interrupt_kinds)}")
     print()
+
+    if source_total:
+        print("Interrupt rate by source (test period):")
+        print("  (all 4 hooks run the layer since 2026-07-15; `?` = inferred, pre-tag record)")
+        for src in sorted(source_total, key=lambda k: -source_total[k]):
+            tot = source_total[src]
+            fr = source_fired[src]
+            rate = f"{100 * fr / tot:.1f}%" if tot else "N/A"
+            print(f"  {src:16s}: {fr:>4}/{tot:<6} = {rate}")
+        print()
 
     if thresholds:
         print(f"Effective threshold range: {min(thresholds):.4f} — {max(thresholds):.4f}")

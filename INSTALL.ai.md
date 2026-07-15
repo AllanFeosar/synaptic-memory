@@ -106,9 +106,17 @@ No commands needed — proceed to Step 5.
 
 ---
 
-## Step 5 — Register Claude Code hooks (global, one-time)
+## Step 5 — Register Claude Code hooks (per project)
 
-Read `~/.claude/settings.json` first, then merge in the `env` and `hooks` blocks below (do not overwrite unrelated settings).
+Hooks are registered **per project**, not globally. For each project where the user wants memory
+injection (including the synaptic-memory repo itself), read that project's
+`<project-root>/.claude/settings.json` first, then merge in the `hooks` block below (do not
+overwrite unrelated settings). Do this once for every project that should get memory injection —
+projects that don't get it are simply unaffected, which is the point: it caps how many projects can
+be slowed down by a large/fragmented palace to only the ones that opted in.
+
+Separately, merge the `env` block into `~/.claude/settings.json` **once, globally** — it only raises
+generic MCP timeouts and isn't project-specific.
 
 Replace `<synaptic-memory-path>` with the actual path from Step 3.
 
@@ -116,12 +124,19 @@ Replace `<synaptic-memory-path>` with the actual path from Step 3.
 > `MCP_TIMEOUT` gives the mempalace MCP server enough time to complete its startup integrity check.
 > `MCP_TOOL_TIMEOUT` prevents tool calls from timing out on slow searches.
 
+`~/.claude/settings.json` (once, global):
 ```json
 {
   "env": {
     "MCP_TIMEOUT": "300000",
     "MCP_TOOL_TIMEOUT": "300000"
-  },
+  }
+}
+```
+
+`<project-root>/.claude/settings.json` (once per project getting memory injection):
+```json
+{
   "hooks": {
     "PreToolUse": [
       {

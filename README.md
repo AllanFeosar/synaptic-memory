@@ -64,18 +64,25 @@ python3.14 -m pip install mcp
 
 Download from [obsidian.md](https://obsidian.md) — free, no account needed.
 
-### Step 5 — Register Claude Code hooks
+### Step 5 — Register Claude Code hooks (per project)
 
-Add to `~/.claude/settings.json`. Replace `<synaptic-memory-path>` with where you cloned this repo.
+Hooks are registered **per project**, not globally — add the `hooks` block to the `.claude/settings.json` of *each project* where you want memory injection (this repo included). This keeps projects that don't use synaptic-memory unaffected, and lets you control the blast radius of palace latency to only the projects that opted in. Add the `env` block once to `~/.claude/settings.json` (it's a generic MCP timeout raise, not project-specific). Replace `<synaptic-memory-path>` with where you cloned this repo.
 
-The `env` block prevents MCP server connection timeouts on large palaces. The hooks chain mempalace (with a 30s timeout wrapper) first, then the typed layer with `--no-mempalace-passthrough` to avoid double-firing:
+The hooks chain mempalace (with a 30s timeout wrapper) first, then the typed layer with `--no-mempalace-passthrough` to avoid double-firing:
 
+`~/.claude/settings.json` (once, global):
 ```json
 {
   "env": {
     "MCP_TIMEOUT": "300000",
     "MCP_TOOL_TIMEOUT": "300000"
-  },
+  }
+}
+```
+
+`<project-root>/.claude/settings.json` (once per project that wants memory injection):
+```json
+{
   "hooks": {
     "PreToolUse": [
       {
@@ -743,7 +750,7 @@ synaptic-memory install
 The installer will handle:
 
 - Dependency resolution (mempalace, graphify, correct Python versions)
-- `~/.claude/settings.json` hook registration
+- `~/.claude/settings.json` env registration (once, global) + per-project `.claude/settings.json` hook registration
 - `.mcp.json` scaffolding per project
 - `~/.mempalace/config.json` palace path setup
 - Nightly consolidation cron registration (platform-aware: crontab on Linux/macOS, Task Scheduler on Windows)

@@ -34,6 +34,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from typed.graphify_client import LocalGraphifyClient  # noqa: E402
 from typed.read import spreading_activation_search     # noqa: E402
+from typed.adhd import ADHDConfig                       # noqa: E402
 
 
 def _summary_max_chars():
@@ -80,6 +81,8 @@ def main() -> int:
             top_k=_max_drawers(),
             depth=1,            # shallow — keep it fast (< 200ms)
             graphify_client=graphify_client,
+            adhd_config=ADHDConfig.from_env(),
+            source="pre_tool_read",
         )
     except Exception:  # noqa: BLE001
         return 0

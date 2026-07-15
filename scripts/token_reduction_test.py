@@ -183,6 +183,39 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _make_client():
+    """
+    Build an Anthropic client.
+
+    Auth resolution order:
+      1. ANTHROPIC_API_KEY env var (standard x-api-key auth), if set.
+      2. Claude Code OAuth token from ~/.claude/.credentials.json — used via
+         Bearer auth (auth_token) with the oauth beta header. This lets the
+         output measurement run on a Claude subscription with no API key.
+    """
+    import os
+    import anthropic
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return anthropic.Anthropic()
+
+    cred_path = Path.home() / ".claude" / ".credentials.json"
+    if cred_path.exists():
+        try:
+            oauth = json.loads(cred_path.read_text(encoding="utf-8")).get("claudeAiOauth", {})
+            token = oauth.get("accessToken")
+            if token:
+                return anthropic.Anthropic(
+                    auth_token=token,
+                    default_headers={"anthropic-beta": "oauth-2025-04-20"},
+                )
+        except (OSError, ValueError):
+            pass
+
+    # No credentials found — let the SDK raise its standard auth error.
+    return anthropic.Anthropic()
+
+
 def _measure_output_tokens(
     cold_user_msg: str,
     warm_user_msg: str,
@@ -193,8 +226,7 @@ def _measure_output_tokens(
     Returns (cold_output_tokens, warm_output_tokens, error_or_empty).
     """
     try:
-        import anthropic
-        client = anthropic.Anthropic()
+        client = _make_client()
 
         cold_resp = client.messages.create(
             model=model,

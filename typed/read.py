@@ -131,6 +131,7 @@ def spreading_activation_search(
     client: Optional[MempalaceClient] = None,
     graphify_client: Optional["GraphifyClient"] = None,
     adhd_config: Optional[ADHDConfig] = None,
+    source: Optional[str] = None,
 ) -> list[TypedDrawer]:
     """Spreading activation retrieval with optional graphify structural hops."""
     cfg = get_config().retrieval
@@ -225,7 +226,14 @@ def spreading_activation_search(
                 {"kind": e.kind, "score": round(e.score, 4), "drawer_id": e.drawer.drawer_id}
                 for e in _interrupt.events
             ],
-            effective_threshold=round(_interrupt.effective_threshold, 4),
+            # Only meaningful when the layer actually ran. Logging it while the
+            # layer is inactive (the default on most retrieval paths pre-2026-07-15)
+            # polluted every interrupt-rate/should-fire analysis with records that
+            # could never fire. None => layer was off for this retrieval.
+            effective_threshold=(
+                round(_interrupt.effective_threshold, 4) if _interrupt.active else None
+            ),
+            source=source,
         )
     except Exception:
         logger.debug("retrieval audit record failed", exc_info=True)
@@ -263,6 +271,7 @@ def inject_session_start(
         client=client,
         graphify_client=graphify_client,
         adhd_config=ADHDConfig.from_env(),
+        source="session_start",
     )
 
     if not drawers:

@@ -28,6 +28,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from typed.graphify_client import LocalGraphifyClient  # noqa: E402
 from typed.read import spreading_activation_search     # noqa: E402
+from typed.adhd import ADHDConfig                       # noqa: E402
 
 
 def _max_inject():
@@ -52,6 +53,8 @@ def main() -> int:
             scope=scope,
             top_k=_max_inject() * 2,
             graphify_client=graphify_client,
+            adhd_config=ADHDConfig.from_env(),
+            source="pre_compact",
         )
 
         if not candidates:

@@ -118,7 +118,7 @@ Over 100 sessions: ~1M tokens saved. Compounds as the palace gets denser.
 
 | What changes in mempalace                    | What breaks here                                    |
 |----------------------------------------------|-----------------------------------------------------|
-| Hook CLI flags / subcommands                 | `~/.claude/settings.json` — manual edit             |
+| Hook CLI flags / subcommands                 | each project's `.claude/settings.json` — manual edit |
 | `mempalace.config.MempalaceConfig` fields    | `typed/client.py` `__init__` only                   |
 | `mempalace.palace.get_collection` signature  | `typed/client.py` `_collection()` only              |
 | `mempalace.searcher.build_where_filter` API  | `typed/client.py` `search()` only                   |

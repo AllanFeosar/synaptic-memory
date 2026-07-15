@@ -89,6 +89,7 @@ class RetrievalRecord:
     results: list  # [{drawer_id, score, type, snippet}]
     interrupt_events: list = field(default_factory=list)  # [{kind, score, drawer_id}]
     effective_threshold: Optional[float] = None
+    source: Optional[str] = None  # hook entry point: session_start / pre_tool_read / post_tool_edit / pre_compact
 
 
 @dataclass
@@ -166,6 +167,7 @@ def record_retrieval(
     duration_ms: float,
     interrupt_events: Optional[list] = None,
     effective_threshold: Optional[float] = None,
+    source: Optional[str] = None,
     log_path: Path = DEFAULT_RETRIEVAL_LOG,
 ) -> None:
     """Append one retrieval event to retrieval-audit.jsonl. Never raises."""
@@ -179,6 +181,7 @@ def record_retrieval(
         results=results,
         interrupt_events=interrupt_events or [],
         effective_threshold=effective_threshold,
+        source=source,
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     _rotate_if_needed(log_path)

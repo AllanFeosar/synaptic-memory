@@ -34,6 +34,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from typed.graphify_client import LocalGraphifyClient  # noqa: E402
 from typed.read import spreading_activation_search     # noqa: E402
+from typed.adhd import ADHDConfig                       # noqa: E402
 
 
 def _summary_max_chars():
@@ -94,6 +95,8 @@ def main() -> int:
             top_k=_max_drawers(),
             depth=1,
             graphify_client=graphify_client,
+            adhd_config=ADHDConfig.from_env(),
+            source="post_tool_edit",
         )
         for d in drawers:
             lines.append(f"Memory: {d.summary(max_chars=_summary_max_chars())}")
