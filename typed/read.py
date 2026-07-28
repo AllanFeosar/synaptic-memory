@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from typed.adhd import ADHDConfig, InterruptLayer
+from typed.adhd_drift import QueryDriftLayer
 from typed.client import InProcessClient, MempalaceClient, SearchHit
 from typed.config import get_config
 from typed.types import MemoryTier, TypedDrawer, parse_drawer, serialize_drawer
@@ -143,14 +144,17 @@ def spreading_activation_search(
     client = client or InProcessClient.get_or_create()
     wing = scope.lower() if scope else None
     _interrupt = InterruptLayer(adhd_config or ADHDConfig())
+    _drift = QueryDriftLayer(adhd_config or ADHDConfig())
 
     search_calls = [0]
+    _NO_WING_OVERRIDE = object()
 
-    def _search(q: str, k: int):
+    def _search(q: str, k: int, search_wing=_NO_WING_OVERRIDE):
         if search_calls[0] >= cfg.max_search_calls:
             return []
         search_calls[0] += 1
-        return client.search(query=q, top_k=k, wing=wing)
+        w = wing if search_wing is _NO_WING_OVERRIDE else search_wing
+        return client.search(query=q, top_k=k, wing=w)
 
     # activation map: drawer_id -> (drawer, activation_score)
     activation: dict[str, tuple[TypedDrawer, float]] = {}
@@ -166,6 +170,19 @@ def spreading_activation_search(
         if d.drawer_id not in activation:
             activation[d.drawer_id] = (d, score)
             frontier.append((d, score))
+
+    # Module 2 — QueryDrift (Inattention): one gated, stochastic exploration pass.
+    # Runs before the interrupt check so a salient drifted bridge can also interrupt.
+    def _drift_retrieve(q, k, scope_escape=False):
+        hits = _search(q, k, search_wing=None) if scope_escape else _search(q, k)
+        out: list[tuple[TypedDrawer, float]] = []
+        for hit in hits:
+            d = _hit_to_drawer(hit)
+            if d is not None:
+                out.append((d, hit.score))
+        return out
+
+    _drift.maybe_drift(query, frontier, _drift_retrieve, activation)
 
     _interrupt.check_seeds(frontier)
 
@@ -233,6 +250,9 @@ def spreading_activation_search(
             effective_threshold=(
                 round(_interrupt.effective_threshold, 4) if _interrupt.active else None
             ),
+            drift_events=[
+                {"strategy": e.strategy, "kept": e.kept} for e in _drift.events
+            ],
             source=source,
         )
     except Exception:

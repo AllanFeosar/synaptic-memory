@@ -28,29 +28,18 @@ class ImpulsivityMode(str, enum.Enum):
 _calibrated: Optional[float] = None
 
 
-def _calibrate_threshold(
-    percentile: float = 0.95,
-    window: int = 200,
-    min_samples: int = 30,
-) -> Optional[float]:
-    """Compute the Nth percentile of top-1 scores from recent retrieval audit data.
+def _tail_top1_scores(log_path: Path, need: int) -> list[float]:
+    """Read up to `need` top-1 result scores from the tail of one audit file.
 
-    Returns None if insufficient data — caller should fall back to the fixed threshold.
-    Cached per process (each hook invocation = one process = one calibration).
+    Newest-first. Returns [] on any error or missing file. Reads only the last
+    ~64 KB (≈200 records at ~300 bytes each) so it stays cheap on large logs.
     """
-    global _calibrated
-    if _calibrated is not None:
-        return _calibrated
-
-    log_path = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
-    if not log_path.exists():
-        return None
-
+    if need <= 0 or not log_path.exists():
+        return []
     try:
         with open(log_path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            # Read last ~64 KB — enough for ~200 records at ~300 bytes each
             chunk_size = min(size, 65_536)
             f.seek(size - chunk_size)
             tail = f.read().decode("utf-8", errors="replace")
@@ -60,9 +49,9 @@ def _calibrate_threshold(
             tail = tail[nl + 1:]
         lines = tail.splitlines()
     except OSError:
-        return None
+        return []
 
-    top1_scores: list[float] = []
+    scores: list[float] = []
     for line in reversed(lines):
         if not line.strip():
             continue
@@ -70,18 +59,49 @@ def _calibrate_threshold(
             rec = json.loads(line)
             results = rec.get("results", [])
             if results and "score" in results[0]:
-                top1_scores.append(results[0]["score"])
+                scores.append(results[0]["score"])
         except (ValueError, TypeError):
             continue
-        if len(top1_scores) >= window:
+        if len(scores) >= need:
             break
+    return scores
+
+
+def _calibrate_threshold(
+    percentile: float = 0.95,
+    window: int = 200,
+    min_samples: int = 30,
+) -> Optional[float]:
+    """Compute the Nth percentile of top-1 scores from recent retrieval audit data.
+
+    Returns None if insufficient data — caller should fall back to the fixed threshold.
+    Cached per process (each hook invocation = one process = one calibration).
+
+    When the live log is short (e.g. just after a 10 MB rotation), tops up from the
+    rotated `retrieval-audit.{1,2,3}.jsonl` files so calibration doesn't collapse to
+    the unreachable fixed fallback for the first ~min_samples retrievals post-rotation.
+    """
+    global _calibrated
+    if _calibrated is not None:
+        return _calibrated
+
+    base = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
+    top1_scores = _tail_top1_scores(base, window)
+
+    idx = 1
+    while len(top1_scores) < window and idx <= 3:
+        rotated = base.with_name(f"retrieval-audit.{idx}.jsonl")
+        if not rotated.exists():
+            break
+        top1_scores.extend(_tail_top1_scores(rotated, window - len(top1_scores)))
+        idx += 1
 
     if len(top1_scores) < min_samples:
         return None
 
     top1_scores.sort()
-    idx = min(int(len(top1_scores) * percentile), len(top1_scores) - 1)
-    _calibrated = top1_scores[idx]
+    i = min(int(len(top1_scores) * percentile), len(top1_scores) - 1)
+    _calibrated = top1_scores[i]
     return _calibrated
 
 
@@ -106,6 +126,10 @@ class ADHDConfig:
     burst_n: int = 3
     max_extra_drawers: int = 2
     burst_timeout_ms: int = 200
+    # Module 2 — QueryDriftLayer (active at level >= 2)
+    drift_salience_gate: float = 1.5
+    drift_temperature: float = 1.5
+    drift_tangent_chars: int = 250
 
     @property
     def impulsivity_mode(self) -> ImpulsivityMode:

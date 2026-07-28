@@ -55,6 +55,9 @@ def main():
     thresholds = []
     source_total = Counter()
     source_fired = Counter()
+    drift_count = 0
+    drift_kept = 0
+    drift_strategies = Counter()
 
     for rec in records:
         for r in rec.get("results", []):
@@ -79,6 +82,12 @@ def main():
         t = rec.get("effective_threshold")
         if isinstance(t, (int, float)):
             thresholds.append(t)
+        dv = rec.get("drift_events") or []
+        if dv:
+            drift_count += 1
+            for d in dv:
+                drift_strategies[d.get("strategy", "?")] += 1
+                drift_kept += d.get("kept", 0)
 
     all_scores.sort(reverse=True)
     test_scores.sort(reverse=True)
@@ -110,6 +119,16 @@ def main():
             rate = f"{100 * fr / tot:.1f}%" if tot else "N/A"
             print(f"  {src:16s}: {fr:>4}/{tot:<6} = {rate}")
         print()
+
+    print("Drift events (Module 2 QueryDrift — fires only at level >= 2):")
+    if drift_count:
+        pct = f"{100 * drift_count / new:.1f}%" if new > 0 else "N/A"
+        print(f"  Retrievals with drift: {drift_count}/{new}  ({pct})")
+        print(f"  By strategy: {dict(drift_strategies)}")
+        print(f"  Drawers merged in (past salience gate): {drift_kept}")
+    else:
+        print("  none — level < 2 (interrupt-only) or no drift dice hits yet")
+    print()
 
     if thresholds:
         print(f"Effective threshold range: {min(thresholds):.4f} — {max(thresholds):.4f}")

@@ -41,6 +41,9 @@ _RANGE_RULES: dict[str, tuple[float, float]] = {
     "week_4_target_drop": (0.01, 1.0),
     "week_8_target_drop": (0.01, 1.0),
     "session_start_timeout_seconds": (1.0, 60.0),
+    "drift_salience_gate": (0.0, 100.0),
+    "drift_temperature": (0.1, 10.0),
+    "drift_tangent_chars": (50, 1000),
 }
 
 import logging as _logging
@@ -118,6 +121,10 @@ class ADHDDefaults:
     burst_n: int = 3
     max_extra_drawers: int = 2
     burst_timeout_ms: int = 200
+    # Module 2 — QueryDriftLayer (active at level >= 2)
+    drift_salience_gate: float = 1.5
+    drift_temperature: float = 1.5
+    drift_tangent_chars: int = 250
 
 
 @dataclass

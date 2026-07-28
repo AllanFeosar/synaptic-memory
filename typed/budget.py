@@ -90,6 +90,7 @@ class RetrievalRecord:
     interrupt_events: list = field(default_factory=list)  # [{kind, score, drawer_id}]
     effective_threshold: Optional[float] = None
     source: Optional[str] = None  # hook entry point: session_start / pre_tool_read / post_tool_edit / pre_compact
+    drift_events: list = field(default_factory=list)  # [{strategy, kept}] — Module 2 QueryDrift
 
 
 @dataclass
@@ -168,6 +169,7 @@ def record_retrieval(
     interrupt_events: Optional[list] = None,
     effective_threshold: Optional[float] = None,
     source: Optional[str] = None,
+    drift_events: Optional[list] = None,
     log_path: Path = DEFAULT_RETRIEVAL_LOG,
 ) -> None:
     """Append one retrieval event to retrieval-audit.jsonl. Never raises."""
@@ -182,6 +184,7 @@ def record_retrieval(
         interrupt_events=interrupt_events or [],
         effective_threshold=effective_threshold,
         source=source,
+        drift_events=drift_events or [],
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     _rotate_if_needed(log_path)

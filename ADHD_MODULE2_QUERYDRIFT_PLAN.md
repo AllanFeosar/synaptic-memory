@@ -1,7 +1,11 @@
 # ADHD Module 2 — QueryDriftLayer (Inattention) — Implementation Plan
 
-Status: **planned** (2026-07-15). Gate satisfied — Module 1 (InterruptLayer) fires ~47% on the
-session-start path and is now wired into all four hooks. See `project_adhd_interrupt_rate_diagnosis`.
+Status: **IMPLEMENTED 2026-07-28** — behind config (`level >= 2`), default stays level 1 so install
+behavior is unchanged. Code: `typed/adhd_drift.py` (QueryDriftLayer), integrated in
+`typed/read.py`, telemetry via `drift_events` in `typed/budget.py`, report block in
+`scripts/adhd_test_report.py`, 18 tests in `tests/test_adhd_drift.py`. **Not yet live-tested** — next
+step is a 1-week window at level 2 (that's when the next test report is due). Gate for building was
+satisfied by Module 1 firing ~11-12% across all paths (see `project_adhd_interrupt_rate_diagnosis`).
 
 ## 1. Goal
 
