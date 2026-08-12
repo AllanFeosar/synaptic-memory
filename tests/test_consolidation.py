@@ -321,5 +321,65 @@ class TestConsolidateReport(unittest.TestCase):
         self.assertEqual(data["archived"], ["drw_1"])
 
 
+# ---------------------------------------------------------------------------
+# Palace write-lock deferral — lock-busy writes must NOT become report.errors
+# ---------------------------------------------------------------------------
+
+_LOCK_MSG = ("palace D:\\Memory\\palace is held by PID 999 "
+             "(hooks/stop_15msg.py); wait for it to finish or stop the holder before retrying")
+
+
+class _LockedClient(MockClient):
+    def update_drawer(self, *a, **kw):
+        raise RuntimeError(_LOCK_MSG)
+
+
+class _BoomClient(MockClient):
+    def update_drawer(self, *a, **kw):
+        raise RuntimeError("disk full")
+
+
+class TestPalaceLockDeferral(unittest.TestCase):
+
+    def _items(self, client, drawers):
+        return _populate_client(client, drawers)
+
+    def test_archive_defers_on_lock_no_error(self):
+        d = _aged_drawer(MemoryTier.EPHEMERAL, age_days=2, usage=0)
+        client = _LockedClient()
+        items = self._items(client, [d])
+        report = ConsolidateReport(started_at="test")
+        with mock.patch("typed.consolidate.get_config", return_value=_make_config()):
+            _archive_old(items, client, report)
+        self.assertTrue(report.palace_locked)
+        self.assertIn("held by PID", report.palace_lock_holder)
+        self.assertEqual(report.archived, [])
+        self.assertEqual(report.errors, [])  # lock-busy is a clean deferral, not an error
+
+    def test_pin_defers_on_lock_no_error(self):
+        drawers = [_aged_drawer(MemoryTier.LONG_TERM, age_days=1, usage=10, scope="auth", body=f"b{i}")
+                   for i in range(2)]
+        for i, d in enumerate(drawers):
+            d.drawer_id = f"drw_pin_lock_{i}"
+        client = _LockedClient()
+        items = self._items(client, drawers)
+        report = ConsolidateReport(started_at="test")
+        with mock.patch("typed.consolidate.get_config", return_value=_make_config(pin_top_fraction=1.0)):
+            _rerank_and_pin(items, client, report)
+        self.assertTrue(report.palace_locked)
+        self.assertEqual(report.auto_pinned, [])
+        self.assertEqual(report.errors, [])
+
+    def test_non_lock_error_still_logged(self):
+        d = _aged_drawer(MemoryTier.EPHEMERAL, age_days=2, usage=0)
+        client = _BoomClient()
+        items = self._items(client, [d])
+        report = ConsolidateReport(started_at="test")
+        with mock.patch("typed.consolidate.get_config", return_value=_make_config()):
+            _archive_old(items, client, report)
+        self.assertFalse(report.palace_locked)
+        self.assertTrue(any("archive" in e and "disk full" in e for e in report.errors))
+
+
 if __name__ == "__main__":
     unittest.main()

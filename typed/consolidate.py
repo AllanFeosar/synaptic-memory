@@ -87,6 +87,8 @@ class ConsolidateReport:
     projects_skipped: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     partial: bool = False
+    palace_locked: bool = False        # a live process held the palace write-lock this run
+    palace_lock_holder: str = ""       # the "held by PID ..." message (first occurrence)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, default=str)
@@ -113,6 +115,33 @@ def _enumerate_drawers(client: MempalaceClient) -> list[tuple[str, TypedDrawer]]
 
 
 # ---------------------------------------------------------------------------
+# Palace write-lock handling — a live process (e.g. a Stop hook writing a
+# session summary, or a mempalace MCP server) can hold the palace write-lock
+# while nightly consolidation runs. Those writes are DEFERRED cleanly to the
+# next run rather than logged as errors — matching the exit-75 skip contract
+# for the graphify mining step. See project-palace-lock-contention-fix.
+# ---------------------------------------------------------------------------
+
+def _is_palace_locked(exc: Exception) -> bool:
+    return "held by PID" in str(exc)
+
+
+def _write_drawer_deferring_lock(client, mid, drawer, report: "ConsolidateReport") -> bool:
+    """Persist a drawer update. On palace-lock-busy, flag report.palace_locked and
+    return False so the caller stops writing this run. Non-lock errors propagate."""
+    try:
+        client.update_drawer(mid, serialize_drawer(drawer))
+        return True
+    except Exception as e:  # noqa: BLE001
+        if _is_palace_locked(e):
+            report.palace_locked = True
+            if not report.palace_lock_holder:
+                report.palace_lock_holder = str(e)
+            return False
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Salience rerank
 # ---------------------------------------------------------------------------
 
@@ -126,14 +155,18 @@ def _rerank_and_pin(
         by_scope.setdefault(d.scope, []).append((mid, d))
 
     for scope, group in by_scope.items():
+        if report.palace_locked:
+            return
         group.sort(key=lambda kv: -kv[1].salience())
         cutoff = max(1, int(len(group) * get_config().consolidation.pin_top_fraction))
         for mid, d in group[:cutoff]:
             if not d.pinned:
                 d.pinned = True
                 try:
-                    client.update_drawer(mid, serialize_drawer(d))
-                    report.auto_pinned.append(d.drawer_id)
+                    if _write_drawer_deferring_lock(client, mid, d, report):
+                        report.auto_pinned.append(d.drawer_id)
+                    else:
+                        return  # palace locked by a live process — defer remaining pins
                 except Exception as e:  # noqa: BLE001
                     report.errors.append(f"pin {d.drawer_id}: {e}")
 
@@ -213,6 +246,8 @@ def _mark_stale_for_changed_files(
 ) -> None:
     if not repo_root or not last_consolidate:
         return
+    if report.palace_locked:
+        return
     for mid, d in items:
         if d.stale:
             continue
@@ -227,7 +262,8 @@ def _mark_stale_for_changed_files(
                     p.stat().st_mtime, _dt.timezone.utc
                 ) > last_consolidate:
                     d.stale = True
-                    client.update_drawer(mid, serialize_drawer(d))
+                    if not _write_drawer_deferring_lock(client, mid, d, report):
+                        return  # palace locked — defer stale marking
                     report.marked_stale.append(d.drawer_id)
                     break
             except OSError:
@@ -253,6 +289,8 @@ def _archive_old(
 
     Pinned drawers are always exempt regardless of tier.
     """
+    if report.palace_locked:
+        return
     now = _dt.datetime.now(_dt.timezone.utc)
     for mid, d in items:
         if d.pinned:
@@ -278,8 +316,10 @@ def _archive_old(
 
         d.scope = f"__archive__{d.scope}"
         try:
-            client.update_drawer(mid, serialize_drawer(d))
-            report.archived.append(d.drawer_id)
+            if _write_drawer_deferring_lock(client, mid, d, report):
+                report.archived.append(d.drawer_id)
+            else:
+                return  # palace locked — defer remaining archives
         except Exception as e:  # noqa: BLE001
             report.errors.append(f"archive {d.drawer_id}: {e}")
 
@@ -360,11 +400,11 @@ def _sync_project_graph(
     bridge = project_root / "scripts" / "mempal_to_graphify.py"
     wiki   = project_root / "scripts" / "graphify_wiki.py"
 
-    # Only execute scripts from repos that also have a .git directory
+    # Only execute scripts from repos that also have a .git directory.
+    # A non-git dir is nothing to sync — a benign skip, not an error, so keep it
+    # out of sync-errors.log / the Notepad popup.
     if not (project_root / ".git").is_dir():
-        report.errors.append(
-            f"[{project_root.name}] skipped — not a git repo (no .git directory)"
-        )
+        report.projects_skipped.append(str(project_root))
         return False
 
     if not bridge.exists():
