@@ -30,8 +30,8 @@ def _classify_source(rec):
 
 def main():
     parser = argparse.ArgumentParser(description="ADHD layer test report")
-    parser.add_argument("--baseline-date", default="2026-07-15")
-    parser.add_argument("--baseline-records", type=int, default=10031)
+    parser.add_argument("--baseline-date", default="2026-08-12")
+    parser.add_argument("--baseline-records", type=int, default=1695)
     args = parser.parse_args()
     BASELINE_DATE = args.baseline_date
     BASELINE_RECORDS = args.baseline_records

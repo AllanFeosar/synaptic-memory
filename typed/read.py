@@ -233,6 +233,7 @@ def spreading_activation_search(
                 {
                     "drawer_id": d.drawer_id,
                     "score": round(s, 4),
+                    "salience": round(d.salience(), 3),
                     "type": d.type.value,
                     "snippet": d.body[:80],
                 }
@@ -253,6 +254,9 @@ def spreading_activation_search(
             drift_events=[
                 {"strategy": e.strategy, "kept": e.kept} for e in _drift.events
             ],
+            drift_effective_gate=(
+                round(_drift.effective_gate, 3) if _drift.active else None
+            ),
             source=source,
         )
     except Exception:

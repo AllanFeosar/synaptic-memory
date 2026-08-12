@@ -127,7 +127,9 @@ class ADHDConfig:
     max_extra_drawers: int = 2
     burst_timeout_ms: int = 200
     # Module 2 — QueryDriftLayer (active at level >= 2)
-    drift_salience_gate: float = 1.5
+    drift_salience_gate: float = 0.5
+    drift_adaptive_gate: bool = True
+    drift_gate_percentile: float = 0.25
     drift_temperature: float = 1.5
     drift_tangent_chars: int = 250
 

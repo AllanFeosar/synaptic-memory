@@ -8,10 +8,12 @@ activation map. Active only at level >= 2. See ADHD_MODULE2_QUERYDRIFT_PLAN.md.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional
 
 from typed.adhd import ADHDConfig
@@ -35,6 +37,92 @@ class DriftEvent:
     strategy: str
     query: str   # the mutated query actually searched (truncated for telemetry)
     kept: int    # drawers merged in after the salience gate
+
+
+# ---------------------------------------------------------------------------
+# Adaptive salience gate — same self-calibration idea as the interrupt layer's
+# _calibrate_threshold, but for drift admission. A fixed gate can't know the
+# corpus's salience distribution; this reads it from the audit log so drift
+# admits genuine bridges (fresh, mid-salience) while still excluding the
+# penalized tail (stale / cite-then-corrected). Cached per process.
+# ---------------------------------------------------------------------------
+
+_calibrated_gate: Optional[float] = None
+
+
+def reset_gate_calibration() -> None:
+    """Clear cached gate calibration (for testing)."""
+    global _calibrated_gate
+    _calibrated_gate = None
+
+
+def _tail_saliences(log_path: Path, need: int) -> list[float]:
+    """Collect up to `need` result salience values from the tail of one audit file."""
+    if need <= 0 or not log_path.exists():
+        return []
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            chunk = min(size, 131_072)  # 128 KB — salience is on every logged result
+            f.seek(size - chunk)
+            tail = f.read().decode("utf-8", errors="replace")
+        nl = tail.find("\n")
+        if nl != -1 and chunk < size:
+            tail = tail[nl + 1:]
+        lines = tail.splitlines()
+    except OSError:
+        return []
+
+    out: list[float] = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        for r in rec.get("results", []):
+            s = r.get("salience")
+            if isinstance(s, (int, float)):
+                out.append(s)
+                if len(out) >= need:
+                    return out
+    return out
+
+
+def _calibrate_salience_gate(
+    percentile: float = 0.25,
+    window: int = 400,
+    min_samples: int = 30,
+) -> Optional[float]:
+    """Nth-percentile of recent result salience — an adaptive drift admission gate.
+
+    Reads the audit-log tail (topping up from rotated files when short), caches per
+    process, returns None when there is not enough salience data yet (caller falls
+    back to the fixed gate). `salience` is logged per result since 2026-08-12.
+    """
+    global _calibrated_gate
+    if _calibrated_gate is not None:
+        return _calibrated_gate
+
+    base = Path.home() / ".synaptic-memory" / "retrieval-audit.jsonl"
+    sals = _tail_saliences(base, window)
+    idx = 1
+    while len(sals) < window and idx <= 3:
+        rotated = base.with_name(f"retrieval-audit.{idx}.jsonl")
+        if not rotated.exists():
+            break
+        sals.extend(_tail_saliences(rotated, window - len(sals)))
+        idx += 1
+
+    if len(sals) < min_samples:
+        return None
+
+    sals.sort()
+    i = min(int(len(sals) * percentile), len(sals) - 1)
+    _calibrated_gate = sals[i]
+    return _calibrated_gate
 
 
 def _boltzmann_choice(logits: list[float], temperature: float, rng: random.Random) -> int:
@@ -65,10 +153,26 @@ class QueryDriftLayer:
         self._config = config
         self._rng = rng or random
         self._events: list[DriftEvent] = []
+        self._effective_gate = self._resolve_gate()
+
+    def _resolve_gate(self) -> float:
+        """Adaptive salience gate if enabled + enough data, else the fixed fallback.
+        Skips calibration entirely when inactive to avoid a log read per retrieval."""
+        if not self.active:
+            return self._config.drift_salience_gate
+        if self._config.drift_adaptive_gate:
+            calibrated = _calibrate_salience_gate(percentile=self._config.drift_gate_percentile)
+            if calibrated is not None:
+                return calibrated
+        return self._config.drift_salience_gate
 
     @property
     def active(self) -> bool:
         return self._config.enabled and self._config.level >= 2
+
+    @property
+    def effective_gate(self) -> float:
+        return self._effective_gate
 
     @property
     def events(self) -> list[DriftEvent]:
@@ -127,7 +231,7 @@ class QueryDriftLayer:
         frontier: list[tuple[TypedDrawer, float]],
     ) -> int:
         """Salience-gate `hits`, then merge up to max_extra_drawers into activation."""
-        gate = self._config.drift_salience_gate
+        gate = self._effective_gate
         cap = self._config.max_extra_drawers
 
         survivors = [

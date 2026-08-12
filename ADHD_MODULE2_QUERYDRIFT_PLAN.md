@@ -1,11 +1,16 @@
 # ADHD Module 2 — QueryDriftLayer (Inattention) — Implementation Plan
 
-Status: **IMPLEMENTED 2026-07-28** — behind config (`level >= 2`), default stays level 1 so install
-behavior is unchanged. Code: `typed/adhd_drift.py` (QueryDriftLayer), integrated in
-`typed/read.py`, telemetry via `drift_events` in `typed/budget.py`, report block in
-`scripts/adhd_test_report.py`, 18 tests in `tests/test_adhd_drift.py`. **Not yet live-tested** — next
-step is a 1-week window at level 2 (that's when the next test report is due). Gate for building was
-satisfied by Module 1 firing ~11-12% across all paths (see `project_adhd_interrupt_rate_diagnosis`).
+Status: **IMPLEMENTED + LIVE** (`level >= 2`), default stays level 1 so install behavior is unchanged.
+Code: `typed/adhd_drift.py` (QueryDriftLayer), integrated in `typed/read.py`, telemetry via
+`drift_events` + `drift_effective_gate` in `typed/budget.py`, report block in
+`scripts/adhd_test_report.py`.
+
+**Live test 1 (2026-08-04 → 08-12):** drift fired 6.7% (on target) but was **inert** — 9/10 fires
+merged nothing, because the *fixed* salience gate (1.5) rejected fresh/cross-domain bridges
+(salience ≈ 1.0). **Fix (2026-08-12):** replaced the fixed gate with an **adaptive salience gate**
+(`_calibrate_salience_gate`, 25th pct of recent salience, same pattern as the interrupt threshold),
+fixed fallback lowered 1.5 → 0.5, `salience` now logged per result. 27 tests in
+`tests/test_adhd_drift.py`. Re-test running from 2026-08-12; success = drift showing `kept > 0`.
 
 ## 1. Goal
 

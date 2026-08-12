@@ -12,10 +12,32 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from typed.adhd import ADHDConfig
-from typed.adhd_drift import DRIFT_DISCOUNT, QueryDriftLayer, _boltzmann_choice
+from typed.adhd_drift import (
+    DRIFT_DISCOUNT,
+    QueryDriftLayer,
+    _boltzmann_choice,
+    _calibrate_salience_gate,
+    _tail_saliences,
+    reset_gate_calibration,
+)
 from typed.client import MockClient
 from typed.types import Confidence, DrawerType, MemoryTier, TypedDrawer
 from typed.write import write_decision, write_drawer
+
+# Keep gate calibration from reading the real audit log during tests: force the
+# tail reader to return nothing so _calibrate_salience_gate yields None (fixed
+# fallback). Adaptive-path tests override this locally.
+_tail_patcher = mock.patch("typed.adhd_drift._tail_saliences", return_value=[])
+
+
+def setUpModule():
+    _tail_patcher.start()
+    reset_gate_calibration()
+
+
+def tearDownModule():
+    _tail_patcher.stop()
+    reset_gate_calibration()
 
 
 def _make_drawer(
@@ -156,7 +178,9 @@ class TestStrategies(unittest.TestCase):
 class TestSalienceGateAndMerge(unittest.TestCase):
 
     def test_low_salience_discarded(self):
-        layer = QueryDriftLayer(_cfg(), rng=_SeqRandom([_HIT, _TEMPORAL]))
+        # explicit fixed gate of 1.5 so a fresh (salience ~1.0) drawer is below it
+        layer = QueryDriftLayer(_cfg(drift_adaptive_gate=False, drift_salience_gate=1.5),
+                                rng=_SeqRandom([_HIT, _TEMPORAL]))
         activation = {}
         layer.maybe_drift("q", [(_high_salience(), 0.5)],
                           _retrieve_returning([(_low_salience(), 0.5)]), activation)
@@ -248,6 +272,76 @@ class TestDriftIntegration(unittest.TestCase):
 
 
 STRATEGIES_NAMES = ("temporal", "tangent", "scope_escape")
+
+
+class TestAdaptiveGate(unittest.TestCase):
+    """The drift salience gate self-calibrates from the audit log, like the interrupt threshold."""
+
+    def setUp(self):
+        reset_gate_calibration()
+
+    def tearDown(self):
+        reset_gate_calibration()
+
+    def test_effective_gate_uses_calibration_when_available(self):
+        with mock.patch("typed.adhd_drift._calibrate_salience_gate", return_value=0.72):
+            layer = QueryDriftLayer(_cfg())  # active + adaptive on
+            self.assertAlmostEqual(layer.effective_gate, 0.72)
+
+    def test_falls_back_to_fixed_when_no_calibration(self):
+        with mock.patch("typed.adhd_drift._calibrate_salience_gate", return_value=None):
+            layer = QueryDriftLayer(_cfg(drift_salience_gate=0.5))
+            self.assertAlmostEqual(layer.effective_gate, 0.5)
+
+    def test_adaptive_off_ignores_calibration(self):
+        with mock.patch("typed.adhd_drift._calibrate_salience_gate", return_value=0.9):
+            layer = QueryDriftLayer(_cfg(drift_adaptive_gate=False, drift_salience_gate=0.3))
+            self.assertAlmostEqual(layer.effective_gate, 0.3)
+
+    def test_inactive_layer_uses_fixed_gate(self):
+        layer = QueryDriftLayer(_cfg(level=1, drift_salience_gate=0.4))
+        self.assertAlmostEqual(layer.effective_gate, 0.4)
+
+    def test_calibrate_percentile_from_saliences(self):
+        data = [float(i) for i in range(100)]  # salience values 0..99
+        with mock.patch("typed.adhd_drift._tail_saliences", side_effect=[data, [], [], []]):
+            g = _calibrate_salience_gate(percentile=0.25, window=400, min_samples=30)
+        self.assertEqual(g, 25.0)  # 25th percentile of 0..99
+
+    def test_calibrate_none_when_insufficient(self):
+        with mock.patch("typed.adhd_drift._tail_saliences", side_effect=[[1.0, 2.0], [], [], []]):
+            g = _calibrate_salience_gate(min_samples=30)
+        self.assertIsNone(g)
+
+    def test_adaptive_gate_admits_fresh_drawer(self):
+        # calibrated gate 0.9 < fresh salience (~1.0) → fresh bridge is now KEPT,
+        # which the old fixed 1.5 gate rejected. This is the fix.
+        with mock.patch("typed.adhd_drift._calibrate_salience_gate", return_value=0.9):
+            layer = QueryDriftLayer(_cfg(), rng=_SeqRandom([_HIT, _TEMPORAL]))
+            activation = {}
+            layer.maybe_drift("q", [(_high_salience(), 0.5)],
+                              _retrieve_returning([(_low_salience("drw_fresh"), 0.5)]), activation)
+        self.assertEqual(layer.events[0].kept, 1)
+        self.assertIn("drw_fresh", activation)
+
+
+class TestTailSaliences(unittest.TestCase):
+
+    def test_reads_salience_from_results(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "audit.jsonl"
+            p.write_text(
+                json.dumps({"results": [{"salience": 1.2}, {"salience": 0.4}]}) + "\n"
+                + json.dumps({"results": [{"salience": 3.0}]}) + "\n",
+                encoding="utf-8",
+            )
+            vals = _tail_saliences(p, need=10)
+        self.assertEqual(sorted(vals), [0.4, 1.2, 3.0])
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(_tail_saliences(Path("/no/such/file.jsonl"), need=10), [])
 
 
 class TestBoltzmann(unittest.TestCase):

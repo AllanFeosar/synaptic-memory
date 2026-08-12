@@ -89,7 +89,11 @@ bottleneck for marginal gain.
 
 The nightly consolidation cron is when graphify earns its keep: it enriches
 mempalace drawers with `stale` flags and pinned status based on graph
-analysis, then renders the Obsidian wiki.
+analysis, then renders the Obsidian wiki. Its palace writes (auto-pin, archive,
+stale-marking) **defer cleanly** when a live process holds the palace write-lock
+(`report.palace_locked`, via `_write_drawer_deferring_lock` in
+`typed/consolidate.py`) instead of erroring — a lock-busy run is retried next
+time, not surfaced as a nightly error popup.
 
 ## Memory tier mapping
 

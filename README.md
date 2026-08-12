@@ -467,8 +467,13 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `adhd` | `adaptive_percentile` | 0.95 | Which percentile of recent top-1 scores to use as the interrupt threshold |
 | `adhd` | `adaptive_window` | 200 | How many recent retrieval records to sample for calibration |
 | `adhd` | `adaptive_min_samples` | 30 | Minimum records needed before adaptive kicks in (falls back to fixed below this) |
-| `adhd` | `p_inattention` | 0.05 | Probability of query drift per invocation |
-| `adhd` | `burst_n` | 3 | Parallel variant queries (ParallelSearchLayer) |
+| `adhd` | `p_inattention` | 0.05 | Probability of query drift per invocation (QueryDriftLayer, level ≥ 2) |
+| `adhd` | `drift_salience_gate` | 0.5 | Fixed fallback gate — a drifted drawer needs `salience()` above this (used pre-calibration / when adaptive off) |
+| `adhd` | `drift_adaptive_gate` | true | Calibrate the drift gate from the recent salience distribution, like the interrupt threshold |
+| `adhd` | `drift_gate_percentile` | 0.25 | Percentile of recent result salience used as the adaptive drift gate |
+| `adhd` | `drift_temperature` | 1.5 | Boltzmann temperature for drift strategy selection |
+| `adhd` | `drift_tangent_chars` | 250 | Tail chars of the weakest frontier drawer used as the tangent query |
+| `adhd` | `burst_n` | 3 | Parallel variant queries (ParallelSearchLayer, planned) |
 | `adhd` | `max_extra_drawers` | 2 | Max ADHD-sourced drawers added on top of base results |
 | `adhd` | `burst_timeout_ms` | 200 | Timeout for parallel burst searches |
 | `consolidation` | `contradiction_sim_threshold` | 0.88 | Cosine similarity above which opposing-type drawers are flagged |
@@ -529,13 +534,14 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | `hooks/pre_tool_read.py` | Yes | PreToolUse/Read hook — file-targeted memory injection |
 | `hooks/post_tool_edit.py` | Yes | PostToolUse/Edit hook — graphify neighbor surfacing after edits |
 | `scripts/mempalace_mcp_fast.py` | Yes | Fast-start MCP wrapper — answers initialize/ping from stdlib instantly, imports mempalace in a background thread |
-| `scripts/adhd_test_report.py` | Yes | ADHD 1-week test monitoring — daily interrupt event report |
+| `scripts/adhd_test_report.py` | Yes | ADHD test monitoring — per-source interrupt rate + QueryDrift (strategy/kept) report |
 | `scripts/mempal_to_graphify.py` | Yes | Bridge: mine ChromaDB → inject into graphify |
 | `scripts/graphify_wiki.py` | Yes | Obsidian wiki generator |
 | `typed/config.py` | Yes | Central config loader — reads `~/.synaptic-memory/config.json`, all tunables |
-| `typed/adhd.py` | Yes | ADHD behavior layer — `ADHDConfig`, `ImpulsivityMode`, `InterruptLayer` |
+| `typed/adhd.py` | Yes | ADHD Module 1 — `ADHDConfig`, `ImpulsivityMode`, `InterruptLayer`, adaptive threshold |
+| `typed/adhd_drift.py` | Yes | ADHD Module 2 — `QueryDriftLayer` (Inattention): gated stochastic drift + adaptive salience gate |
 | `typed/health.py` | Yes | Health check — palace, config, consolidation recency, retrieval audit, hooks. Run: `py -3.11 -m typed.health` |
-| `typed/` | Yes | Full typed memory package: types, write, read, consolidate, telemetry, budget, config, adhd, health, client, graphify_client |
+| `typed/` | Yes | Full typed memory package: types, write, read, consolidate, telemetry, budget, config, adhd, adhd_drift, health, client, graphify_client |
 | `tests/` | Yes | Unit tests |
 | `graphify-out/` | No (gitignored) | Auto-generated graph + Obsidian vault |
 
@@ -562,6 +568,7 @@ Missing keys fall back to defaults. You never need to specify the full file — 
 | Palace HNSW diverged | Run `python3.11 -m mempalace repair --yes` |
 | Consolidation task missing | Re-run the `Register-ScheduledTask` PowerShell block in Step 7 |
 | `consolidate-report.json` empty | Task ran but mempalace has no typed drawers yet — complete sessions first |
+| `sync-errors.log` shows `pin/archive … held by PID` | Benign: a live process (a Stop hook or MCP server) held the palace write-lock during the nightly run. Consolidation now **defers** those writes to the next run (`report.palace_locked=true`) instead of erroring/popping Notepad. If it recurs every night, reschedule the consolidation task to off-hours when no Claude window is open. |
 | Config not taking effect | `get_config()` is cached per process — changes to `config.json` take effect on next hook invocation |
 | `config.json` doesn't exist | Run `py -3.11 -m typed.config --init` to write defaults |
 | Typo in `config.json` crashes silently | JSON parse errors are swallowed — run `py -3.11 -m typed.config` to verify effective config |
@@ -585,7 +592,8 @@ The full stack is implemented and running:
 - Exponential decay / half-life salience — per-tier decay curves replace hard TTL cutoffs
 - TTL-tiered expiration — EPHEMERAL (1d), SHORT_TERM (7d), LONG_TERM (90d), PERMANENT tiers
 - Dynamic config — all tunables in `~/.synaptic-memory/config.json`, no code changes needed
-- ADHD InterruptLayer — interrupt-driven early-exit retrieval wired into spreading activation (disabled by default)
+- ADHD InterruptLayer (Module 1) — interrupt-driven early-exit retrieval wired into all four retrieval hooks, adaptive threshold (disabled by default)
+- ADHD QueryDriftLayer (Module 2) — gated stochastic query drift with an adaptive salience gate, active at `level ≥ 2`
 
 **The next 90 days are a testing and hardening period.** Real-world usage across multiple projects will surface edge cases, performance issues, and UX friction before a public release.
 
@@ -652,7 +660,7 @@ A non-linear retrieval layer that adds human-like associative behavior on top of
 
 **Why:** Linear retrieval (query → top-k) misses bridging memories, cross-domain patterns, and high-value low-usage drawers. The ADHD layer surfaces what focused search buries — without replacing it.
 
-**Status:** Module 1 (InterruptLayer) shipped 2026-06-23, bug-fixed 2026-06-27 (was not wired into `inject_session_start`). 1-week test active (2026-06-27 → 2026-07-04). Modules 2 and 3 are next.
+**Status:** Module 1 (InterruptLayer) shipped 2026-06-23, and since 2026-07-15 is wired into **all four** retrieval hooks (SessionStart, PreToolUse/Read, PostToolUse/Edit, PreCompact) — ~11–12% interrupt rate across paths. Module 2 (QueryDriftLayer) built 2026-07-28 in `typed/adhd_drift.py`, live behind `level ≥ 2` since 2026-08-04, with an **adaptive salience gate** (2026-08-12). Module 3 (ParallelSearchLayer) is planned.
 
 #### The three modules
 
@@ -665,19 +673,17 @@ Interrupt-driven early-exit retrieval. Surfaces a strong hit immediately without
 - Wired into `spreading_activation_search()`: `check_seeds()` pre-hop, `post_merge()` post-ranking
 - **No phasic gain score multiplier** — inflating scores before threshold check would break all downstream callers
 - `ImpulsivityMode` enum: `OFF / LOW / MEDIUM / HIGH` — config.json controls the default, `SYNAPTIC_ADHD_LEVEL` overrides
-- 142 total tests across 5 test files (typed, ADHD, hooks, consolidation, telemetry, budget)
+- 172 total tests across 6 test files (typed, ADHD, ADHD-drift, hooks, consolidation, telemetry, budget)
 
-**2. QueryDriftLayer (Inattention) — build next**
+**2. QueryDriftLayer (Inattention) — BUILT (`typed/adhd_drift.py`), live at `level ≥ 2`**
 
-Stochastic query mutation. With probability `p=0.05` (NOT 0.25 — too destructive), mutates the query before passing to core search via one of three strategies:
+Stochastic query mutation. With probability `p_inattention=0.05` (NOT 0.25 — too destructive), mutates the query before the hop loop via one of three strategies, chosen by **Boltzmann sampling** (`drift_temperature=1.5`) over the strategy set:
 
-- **Temporal hop:** use most-recently-written drawer body as the query seed (PAM temporal co-occurrence)
-- **Lexical tangent:** append a noun phrase extracted from a random high-salience drawer
-- **Scope escape:** lift the wing filter and search globally instead of project-local
+- **Temporal:** same query, but drifted survivors are re-ranked oldest-first (inverse recency)
+- **Lexical tangent:** query = last `drift_tangent_chars` (250) of the **weakest** frontier member's body — trailing text is where tangential asides live
+- **Scope escape:** rerun the query with the wing filter dropped (search globally, not project-local)
 
-Uses Boltzmann sampling (`temperature=1.5`) instead of argmax top-k for neighbor selection. Tangent jumps originate from the **weakest** frontier member (not strongest), using the last 250 chars of its body as seed — trailing text is where tangential asides live.
-
-Gate: drifted results must have `salience() > 1.5` to be admitted. Stale drawers excluded from tangent candidates.
+**Adaptive salience gate:** drifted drawers must clear a salience gate to be admitted, but the gate is not a fixed number — `_calibrate_salience_gate()` sets it to the `drift_gate_percentile` (25th) of the recent salience distribution (audit-log tail + rotated files, cached per process), exactly like the interrupt threshold's `_calibrate_threshold()`. Falls back to the fixed `drift_salience_gate` (0.5) until ~30 salience samples exist. Survivors are discounted ×0.7 and capped at `max_extra_drawers=2`. Telemetry: `drift_events` (strategy + kept count) and `drift_effective_gate` are logged per retrieval; `salience` is logged per result. Integrated inline in `spreading_activation_search()` — no separate orchestration layer.
 
 **3. ParallelSearchLayer (Hyperactivity) — build last, never in default config**
 
@@ -691,17 +697,19 @@ Parallel burst searches across multiple query variants and cross-domain wings si
 #### Architecture
 
 ```
-inject_session_start()
-    └─► adhd_search(query, scope, config)          ← typed/adhd.py
-            ① QueryDriftLayer.drift()              maybe mutate query/scope
-            ② InterruptLayer.pre_check(seeds)      register strong hits before full search
-            ③ spreading_activation_search()        existing core — UNCHANGED
-            ④ ParallelSearchLayer.burst()          append up to 2 novel extras
-            ⑤ InterruptLayer.post_merge()          prepend pre-registered hits, dedup
-            ⑥ cap at SESSION_START_TOP_K=3
+SessionStart / PreToolUse·Read / PostToolUse·Edit / PreCompact
+    └─► spreading_activation_search(query, scope, adhd_config)   ← typed/read.py
+            ① seed search (semantic, top_k×2)
+            ② QueryDriftLayer.maybe_drift()        [level ≥ 2] gated stochastic exploration
+            ③ InterruptLayer.check_seeds()          register strong seed hits (pre-hop)
+            ④ hop loop (spreading activation + graphify)   core — UNCHANGED
+            ⑤ rank by activation + salience
+            ⑥ InterruptLayer.post_merge()           prepend registered hits, dedup
+            ⑦ cap at session_start_top_k=3
+        ParallelSearchLayer.burst()  ← Module 3, planned
 ```
 
-Single integration point: one line change in `inject_session_start()` in `typed/read.py`. Everything else untouched.
+Integration is inline in `spreading_activation_search()` (`typed/read.py`) — both layers are constructed there and each hook passes `adhd_config=ADHDConfig.from_env()`. No separate `adhd_search()` wrapper.
 
 #### Default config
 

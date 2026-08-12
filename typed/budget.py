@@ -91,6 +91,7 @@ class RetrievalRecord:
     effective_threshold: Optional[float] = None
     source: Optional[str] = None  # hook entry point: session_start / pre_tool_read / post_tool_edit / pre_compact
     drift_events: list = field(default_factory=list)  # [{strategy, kept}] — Module 2 QueryDrift
+    drift_effective_gate: Optional[float] = None  # adaptive salience gate in effect (None if drift inactive)
 
 
 @dataclass
@@ -170,6 +171,7 @@ def record_retrieval(
     effective_threshold: Optional[float] = None,
     source: Optional[str] = None,
     drift_events: Optional[list] = None,
+    drift_effective_gate: Optional[float] = None,
     log_path: Path = DEFAULT_RETRIEVAL_LOG,
 ) -> None:
     """Append one retrieval event to retrieval-audit.jsonl. Never raises."""
@@ -185,6 +187,7 @@ def record_retrieval(
         effective_threshold=effective_threshold,
         source=source,
         drift_events=drift_events or [],
+        drift_effective_gate=drift_effective_gate,
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
     _rotate_if_needed(log_path)
